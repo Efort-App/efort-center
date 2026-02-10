@@ -4,9 +4,17 @@ const {onCall, HttpsError} = require("firebase-functions/v2/https");
 
 const REGION = "europe-west1";
 const ANALYTICS_ADMIN_UID = "B2Xm8CFPyIS2taVlusbcIicWItF3";
-const META_GRAPH_VERSION = "v21.0";
+const DEFAULT_META_GRAPH_VERSION = "v24.0";
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_RETRIES = 3;
+
+function getMetaGraphVersion() {
+  const configured = String(process.env.META_GRAPH_VERSION || "").trim();
+  if (/^v\d+\.\d+$/.test(configured)) {
+    return configured;
+  }
+  return DEFAULT_META_GRAPH_VERSION;
+}
 
 function parseDateOrThrow(value, label) {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -32,6 +40,13 @@ function rowKeyForLevel(row, level) {
   if (level === "campaign") return String(row.campaign_id || "unknown_campaign");
   if (level === "adset") return String(row.adset_id || "unknown_adset");
   return String(row.ad_id || "unknown_ad");
+}
+
+function normalizeAdAccountId(value) {
+  const raw = String(value || "").trim();
+  if (/^act_\d+$/.test(raw)) return raw;
+  if (/^\d+$/.test(raw)) return `act_${raw}`;
+  return raw;
 }
 
 async function getWithRetry(url, params, attempt = 1) {
@@ -140,8 +155,10 @@ exports.getMetaInsights = onCall(
             "Missing META_MARKETING_ACCESS_TOKEN or META_AD_ACCOUNT_ID.",
         );
       }
+      const graphVersion = getMetaGraphVersion();
+      const normalizedAdAccountId = normalizeAdAccountId(adAccountId);
 
-      let url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${adAccountId}/insights`;
+      let url = `https://graph.facebook.com/${graphVersion}/${normalizedAdAccountId}/insights`;
       let params = {
         access_token: accessToken,
         level: "ad",
