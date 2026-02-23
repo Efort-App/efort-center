@@ -33,3 +33,15 @@ Internal analytics dashboard for Efort. Built with React + Vite and secured by F
 ## Access
 
 Only users with an `internal_admins/{uid}` doc can access the dashboard.
+
+## Athlete Type Response Mix
+
+- Data source: `coaches_public.onboarding_athletes_types`
+- Accepted values: `powerlifters`, `bodybuilders`, `other`
+- Ratio definition: daily response share (each day is normalized to 100%; multi-select answers are counted separately)
+- Missing-data policy: coaches with missing/invalid athlete types are excluded from this chart
+- Additional daily counts chart buckets:
+  - only `powerlifters`
+  - only `bodybuilders`
+  - `powerlifters` + `bodybuilders` (without `other`)
+  - any selection including `other`

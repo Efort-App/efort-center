@@ -303,6 +303,10 @@ button.secondary:hover {
   margin-bottom: 1rem;
 }
 
+.attribution-kpi-grid {
+  margin-bottom: 1.25rem;
+}
+
 .kpi-card {
   padding: 1.25rem;
   display: flex;
@@ -333,6 +337,15 @@ button.secondary:hover {
   color: var(--text-secondary);
 }
 
+.kpi-card .sub code {
+  font-family: "Menlo", "Monaco", monospace;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  background: #EAECEF;
+  color: var(--text);
+}
+
 /* --- Charts --- */
 .chart-grid {
   display: grid;
@@ -361,6 +374,12 @@ button.secondary:hover {
   position: relative;
   flex: 1;
   min-height: 240px;
+}
+
+.chart-footnote {
+  margin-top: 0.75rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
 }
 
 /* --- Table --- */

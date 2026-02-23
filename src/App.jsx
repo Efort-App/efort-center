@@ -14,8 +14,12 @@ import {
   Legend,
   Filler,
 } from "chart.js";
-import {Bar, Doughnut, Line} from "react-chartjs-2";
+import {Bar, Line} from "react-chartjs-2";
 import {auth, db, functions, googleProvider} from "./firebase";
+import {
+  computeAthleteTypeDailyCoachMix,
+  computeAthleteTypeDailyDistribution,
+} from "./athleteTypeDistribution";
 
 ChartJS.register(
   CategoryScale,
@@ -58,6 +62,8 @@ const priceCatalog = {
 const adKeyAliases = {};
 const adsetKeyAliases = {};
 const campaignKeyAliases = {};
+const INFERRED_PAID_UNKNOWN = "inferred_paid_unknown";
+const INFERRED_PAID_COUNTRY_CODES = new Set(["US", "GB"]);
 
 function formatDateInput(date) {
   return date.toISOString().slice(0, 10);
@@ -93,6 +99,11 @@ function formatCurrency(value, digits = 0, currency = "EUR") {
   }).format(numberValue);
 }
 
+function formatMetaLinkedMetric(row, formatter) {
+  if (!row?.hasMetaAttributionLink) return "N/A";
+  return formatter();
+}
+
 function buildUniqueList(values) {
   return Array.from(new Set(values)).filter(Boolean).sort();
 }
@@ -111,12 +122,41 @@ function normalizeKey(value, fallback) {
   return String(value);
 }
 
-function hasAdAttribution(record) {
+function hasFbclid(record) {
   const value = record?.fbclid;
   if (typeof value === "string") {
     return value.trim().length > 0;
   }
   return Boolean(value);
+}
+
+function normalizeCountryCode(value) {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim().toUpperCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function getAttribution(record) {
+  const countryCode = normalizeCountryCode(record?.signup_country_code);
+  if (hasFbclid(record)) {
+    return {
+      isPaid: true,
+      type: "tracked_paid",
+      countryCode,
+    };
+  }
+  if (countryCode && INFERRED_PAID_COUNTRY_CODES.has(countryCode)) {
+    return {
+      isPaid: true,
+      type: "inferred_paid",
+      countryCode,
+    };
+  }
+  return {
+    isPaid: false,
+    type: "non_paid",
+    countryCode,
+  };
 }
 
 function aliasKey(rawKey, aliases, fallback) {
@@ -136,10 +176,6 @@ function getOrCreate(map, key, factory) {
     map.set(key, factory());
   }
   return map.get(key);
-}
-
-function incrementMap(map, key, by = 1) {
-  map.set(key, (map.get(key) || 0) + by);
 }
 
 function toNumber(value) {
@@ -197,20 +233,16 @@ function safeWriteCache(key, payload) {
   }
 }
 
-function sourceBucket(record) {
-  const source = normalizeKey(record?.utm_source, "unknown").toLowerCase();
-  if (source.includes("instagram") || source === "ig") return "Instagram";
-  if (source.includes("facebook") || source === "fb") return "Facebook";
-  return "Other";
-}
-
 function createAdRow(id, adsetId = "unknown_adset", campaignId = "unknown_campaign") {
   return {
     id,
     ad_id: id,
     adset_id: adsetId,
     campaign_id: campaignId,
+    hasMetaAttributionLink: false,
     signups: 0,
+    tracked_signups: 0,
+    inferred_signups: 0,
     invited: 0,
     blocked: 0,
     athleteShown: 0,
@@ -272,19 +304,23 @@ function aggregateMetaRows(rows, filters) {
 }
 
 function computeAdMetrics(row) {
-  const impressionsPerEuro = row.spend > 0 ? row.impressions / row.spend : null;
-  const clicksPerEuro = row.spend > 0 ? row.clicks / row.spend : null;
-  const ctr = row.impressions > 0 ? row.clicks / row.impressions : null;
-  const cpc = row.clicks > 0 ? row.spend / row.clicks : null;
-  const cpm = row.impressions > 0 ? (row.spend * 1000) / row.impressions : null;
-  const clickToSignupRate = row.clicks > 0 ? row.signups / row.clicks : null;
+  const impressionsPerEuro =
+    row.hasMetaAttributionLink && row.spend > 0 ? row.impressions / row.spend : null;
+  const clicksPerEuro = row.hasMetaAttributionLink && row.spend > 0 ? row.clicks / row.spend : null;
+  const ctr = row.hasMetaAttributionLink && row.impressions > 0 ? row.clicks / row.impressions : null;
+  const cpc = row.hasMetaAttributionLink && row.clicks > 0 ? row.spend / row.clicks : null;
+  const cpm =
+    row.hasMetaAttributionLink && row.impressions > 0 ? (row.spend * 1000) / row.impressions : null;
+  const clickToSignupRate =
+    row.hasMetaAttributionLink && row.clicks > 0 ? row.signups / row.clicks : null;
   const paidRate = row.signups > 0 ? row.paid / row.signups : null;
   const inviteRate = row.signups > 0 ? row.invited / row.signups : null;
   const blockRate = row.signups > 0 ? row.blocked / row.signups : null;
   const athleteRate = row.signups > 0 ? row.athleteShown / row.signups : null;
-  const costPerSignup = row.signups > 0 ? row.spend / row.signups : null;
-  const cac = row.paid > 0 ? row.spend / row.paid : null;
-  const roas = row.spend > 0 ? row.revenue / row.spend : null;
+  const costPerSignup =
+    row.hasMetaAttributionLink && row.signups > 0 ? row.spend / row.signups : null;
+  const cac = row.hasMetaAttributionLink && row.paid > 0 ? row.spend / row.paid : null;
+  const roas = row.hasMetaAttributionLink && row.spend > 0 ? row.revenue / row.spend : null;
 
   return {
     ...row,
@@ -307,7 +343,7 @@ function computeAdMetrics(row) {
 export default function App() {
   const today = new Date();
   const defaultEnd = formatDateInput(today);
-  const defaultStart = formatDateInput(addDays(today, -89));
+  const defaultStart = `${today.getFullYear()}-02-03`;
 
   const [user, setUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
@@ -495,40 +531,55 @@ export default function App() {
   }, [metaRows]);
 
   const scopedRecords = useMemo(() => {
-    if (audienceScope === "all") return records;
-    return records.filter((record) => hasAdAttribution(record));
+    const enriched = records.map((record) => {
+      const attribution = getAttribution(record);
+      const inferredFallback = attribution.type === "inferred_paid" ? INFERRED_PAID_UNKNOWN : null;
+      const adId = aliasKey(record.utm_content, adKeyAliases, inferredFallback || "unknown_ad");
+      const adsetId = aliasKey(record.utm_adset, adsetKeyAliases, inferredFallback || "unknown_adset");
+      const campaignId = aliasKey(
+        record.utm_campaign,
+        campaignKeyAliases,
+        inferredFallback || "unknown_campaign",
+      );
+
+      return {
+        ...record,
+        _attribution: attribution,
+        _adId: adId,
+        _adsetId: adsetId,
+        _campaignId: campaignId,
+      };
+    });
+    if (audienceScope === "all") return enriched;
+    return enriched.filter((record) => record._attribution.isPaid);
   }, [records, audienceScope]);
 
   const adsetOptions = useMemo(() => {
     return buildUniqueList([
-      ...scopedRecords.map((item) => aliasKey(item.utm_adset, adsetKeyAliases, "unknown_adset")),
+      ...scopedRecords.map((item) => item._adsetId),
       ...normalizedMetaRows.map((item) => item.adset_id),
     ]);
   }, [scopedRecords, normalizedMetaRows]);
 
   const campaignOptions = useMemo(() => {
     return buildUniqueList([
-      ...scopedRecords.map((item) => aliasKey(item.utm_campaign, campaignKeyAliases, "unknown_campaign")),
+      ...scopedRecords.map((item) => item._campaignId),
       ...normalizedMetaRows.map((item) => item.campaign_id),
     ]);
   }, [scopedRecords, normalizedMetaRows]);
 
   const adOptions = useMemo(() => {
     return buildUniqueList([
-      ...scopedRecords.map((item) => aliasKey(item.utm_content, adKeyAliases, "unknown_ad")),
+      ...scopedRecords.map((item) => item._adId),
       ...normalizedMetaRows.map((item) => item.ad_id),
     ]);
   }, [scopedRecords, normalizedMetaRows]);
 
   const filteredRecords = useMemo(() => {
     return scopedRecords.filter((record) => {
-      const adValue = aliasKey(record.utm_content, adKeyAliases, "unknown_ad");
-      const adsetValue = aliasKey(record.utm_adset, adsetKeyAliases, "unknown_adset");
-      const campaignValue = aliasKey(record.utm_campaign, campaignKeyAliases, "unknown_campaign");
-
-      if (adsetFilter !== "all" && adsetValue !== adsetFilter) return false;
-      if (campaignFilter !== "all" && campaignValue !== campaignFilter) return false;
-      if (adFilter !== "all" && adValue !== adFilter) return false;
+      if (adsetFilter !== "all" && record._adsetId !== adsetFilter) return false;
+      if (campaignFilter !== "all" && record._campaignId !== campaignFilter) return false;
+      if (adFilter !== "all" && record._adId !== adFilter) return false;
       return true;
     });
   }, [scopedRecords, adsetFilter, campaignFilter, adFilter]);
@@ -543,8 +594,15 @@ export default function App() {
 
   const derived = useMemo(() => {
     const adMap = new Map();
-    const sourceCounts = new Map();
     const coachesByDate = new Map();
+    const athleteTypeDailyDistribution = computeAthleteTypeDailyDistribution(
+      filteredRecords,
+      (record) => record?.trial_period_start_date,
+    );
+    const athleteTypeDailyCoachMix = computeAthleteTypeDailyCoachMix(
+      filteredRecords,
+      (record) => record?.trial_period_start_date,
+    );
 
     const funnelTotals = {
       signups: 0,
@@ -555,11 +613,20 @@ export default function App() {
       revenue: 0,
       paidKnownRevenue: 0,
     };
+    const attributionTotals = {
+      trackedSignups: 0,
+      inferredSignups: 0,
+      nonPaidSignups: 0,
+      trackedPaid: 0,
+      inferredPaid: 0,
+      nonPaidPaid: 0,
+    };
 
     for (const record of filteredRecords) {
-      const adId = aliasKey(record.utm_content, adKeyAliases, "unknown_ad");
-      const adsetId = aliasKey(record.utm_adset, adsetKeyAliases, "unknown_adset");
-      const campaignId = aliasKey(record.utm_campaign, campaignKeyAliases, "unknown_campaign");
+      const attributionType = record._attribution?.type || "non_paid";
+      const adId = record._adId;
+      const adsetId = record._adsetId;
+      const campaignId = record._campaignId;
 
       const row = getOrCreate(adMap, adId, () => createAdRow(adId, adsetId, campaignId));
       row.adset_id = row.adset_id || adsetId;
@@ -567,6 +634,15 @@ export default function App() {
 
       row.signups += 1;
       funnelTotals.signups += 1;
+      if (attributionType === "tracked_paid") {
+        row.tracked_signups += 1;
+        attributionTotals.trackedSignups += 1;
+      } else if (attributionType === "inferred_paid") {
+        row.inferred_signups += 1;
+        attributionTotals.inferredSignups += 1;
+      } else {
+        attributionTotals.nonPaidSignups += 1;
+      }
 
       const inviteCompleted = isStepCompleted(record, "onboarding_show_invite_client") === true;
       const blockCompleted = isStepCompleted(record, "onboarding_show_block") === true;
@@ -588,6 +664,13 @@ export default function App() {
       if (paid) {
         row.paid += 1;
         funnelTotals.paid += 1;
+        if (attributionType === "tracked_paid") {
+          attributionTotals.trackedPaid += 1;
+        } else if (attributionType === "inferred_paid") {
+          attributionTotals.inferredPaid += 1;
+        } else {
+          attributionTotals.nonPaidPaid += 1;
+        }
       }
 
       const priceId = record.subscription_price_id;
@@ -603,15 +686,23 @@ export default function App() {
         funnelTotals.paidKnownRevenue += 1;
       }
 
-      incrementMap(sourceCounts, sourceBucket(record));
-
       const dateKey = toDateKey(record.trial_period_start_date);
       if (dateKey) {
         const dateRow = getOrCreate(coachesByDate, dateKey, () => ({
           signups: 0,
           paid: 0,
+          tracked_signups: 0,
+          inferred_signups: 0,
+          non_paid_signups: 0,
         }));
         dateRow.signups += 1;
+        if (attributionType === "tracked_paid") {
+          dateRow.tracked_signups += 1;
+        } else if (attributionType === "inferred_paid") {
+          dateRow.inferred_signups += 1;
+        } else {
+          dateRow.non_paid_signups += 1;
+        }
         if (paid) {
           dateRow.paid += 1;
         }
@@ -633,6 +724,7 @@ export default function App() {
       row.spend = meta.spend;
       row.impressions = meta.impressions;
       row.clicks = meta.clicks;
+      row.hasMetaAttributionLink = true;
     }
 
     const adRows = Array.from(adMap.values()).map((row) => computeAdMetrics(row));
@@ -662,10 +754,10 @@ export default function App() {
       labels: coachDates,
       signups: coachDates.map((date) => coachesByDate.get(date)?.signups || 0),
       paid: coachDates.map((date) => coachesByDate.get(date)?.paid || 0),
+      trackedSignups: coachDates.map((date) => coachesByDate.get(date)?.tracked_signups || 0),
+      inferredSignups: coachDates.map((date) => coachesByDate.get(date)?.inferred_signups || 0),
+      nonPaidSignups: coachDates.map((date) => coachesByDate.get(date)?.non_paid_signups || 0),
     };
-
-    const channelLabels = ["Instagram", "Facebook", "Other"];
-    const channelValues = channelLabels.map((label) => sourceCounts.get(label) || 0);
 
     return {
       adRows,
@@ -674,11 +766,10 @@ export default function App() {
       metaSeries,
       coachSeries,
       funnelTotals,
-      channelMix: {
-        labels: channelLabels,
-        values: channelValues,
-      },
+      attributionTotals,
       metaTotals: metaAggregate.totals,
+      athleteTypeDailyDistribution,
+      athleteTypeDailyCoachMix,
     };
   }, [filteredRecords, metaAggregate]);
 
@@ -690,6 +781,9 @@ export default function App() {
         return (b.spend || 0) - (a.spend || 0);
       });
   }, [derived.adRows]);
+  const topBySignupsWithMeta = useMemo(() => {
+    return derived.topBySignups.filter((row) => row.hasMetaAttributionLink);
+  }, [derived.topBySignups]);
 
   const overallImpressionsPerEuro =
     derived.metaTotals.spend > 0
@@ -727,6 +821,18 @@ export default function App() {
   const overallRoas =
     derived.metaTotals.spend > 0
       ? derived.funnelTotals.revenue / derived.metaTotals.spend
+      : null;
+  const paidAttributedSignups =
+    derived.attributionTotals.trackedSignups + derived.attributionTotals.inferredSignups;
+  const inferredShare =
+    paidAttributedSignups > 0 ? derived.attributionTotals.inferredSignups / paidAttributedSignups : null;
+  const trackedCostPerSignup =
+    derived.attributionTotals.trackedSignups > 0
+      ? derived.metaTotals.spend / derived.attributionTotals.trackedSignups
+      : null;
+  const trackedCac =
+    derived.attributionTotals.trackedPaid > 0
+      ? derived.metaTotals.spend / derived.attributionTotals.trackedPaid
       : null;
 
   const chartBaseOptions = {
@@ -1124,33 +1230,191 @@ export default function App() {
           </div>
 
           <div className="card chart-card">
-            <h3>Channel Mix: Instagram vs Facebook</h3>
-            {derived.channelMix.values.every((value) => value === 0) ? (
-              <p>No UTM source data available.</p>
+            <h3>Attribution Confidence Over Time</h3>
+            {derived.coachSeries.labels.length === 0 ? (
+              <p>No signup attribution data in this range.</p>
             ) : (
               <div className="chart-area">
-                <Doughnut
+                <Bar
                   data={{
-                    labels: derived.channelMix.labels,
+                    labels: derived.coachSeries.labels,
                     datasets: [
                       {
-                        data: derived.channelMix.values,
-                        backgroundColor: [
-                          palette.accent,
-                          palette.brand,
-                          palette.slate,
-                        ],
-                        borderWidth: 0,
+                        label: "Tracked paid (fbclid)",
+                        data: derived.coachSeries.trackedSignups,
+                        backgroundColor: "rgba(63, 123, 141, 0.72)",
+                        borderRadius: 4,
+                      },
+                      {
+                        label: "Inferred paid (US/GB)",
+                        data: derived.coachSeries.inferredSignups,
+                        backgroundColor: "rgba(224, 170, 82, 0.75)",
+                        borderRadius: 4,
                       },
                     ],
                   }}
                   options={{
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: chartBaseOptions.plugins,
+                    ...chartBaseOptions,
+                    scales: {
+                      x: {
+                        ...chartBaseOptions.scales.x,
+                        stacked: true,
+                      },
+                      y: {
+                        ...chartBaseOptions.scales.y,
+                        stacked: true,
+                      },
+                    },
                   }}
                 />
               </div>
+            )}
+          </div>
+
+          <div className="card chart-card">
+            <h3>Daily Athlete Type Mix (100%)</h3>
+            {derived.athleteTypeDailyDistribution.labels.length === 0 ? (
+              <p>No onboarding athlete-type responses in this range.</p>
+            ) : (
+              <>
+                <div className="chart-area">
+                  <Bar
+                    data={{
+                      labels: derived.athleteTypeDailyDistribution.labels,
+                      datasets: [
+                        {
+                          label: "Powerlifters",
+                          data: derived.athleteTypeDailyDistribution.powerlifters,
+                          responseCounts: derived.athleteTypeDailyDistribution.powerliftersCounts,
+                          backgroundColor: "rgba(63, 123, 141, 0.72)",
+                          borderRadius: 4,
+                        },
+                        {
+                          label: "Bodybuilders",
+                          data: derived.athleteTypeDailyDistribution.bodybuilders,
+                          responseCounts: derived.athleteTypeDailyDistribution.bodybuildersCounts,
+                          backgroundColor: "rgba(99, 91, 255, 0.68)",
+                          borderRadius: 4,
+                        },
+                        {
+                          label: "Other",
+                          data: derived.athleteTypeDailyDistribution.other,
+                          responseCounts: derived.athleteTypeDailyDistribution.otherCounts,
+                          backgroundColor: "rgba(214, 138, 66, 0.68)",
+                          borderRadius: 6,
+                        },
+                      ],
+                    }}
+                    options={{
+                      ...chartBaseOptions,
+                      plugins: {
+                        ...chartBaseOptions.plugins,
+                        tooltip: {
+                          ...chartBaseOptions.plugins.tooltip,
+                          callbacks: {
+                            label: (context) => {
+                              const percentage = Number(context.parsed?.y ?? 0);
+                              const counts = Array.isArray(context.dataset.responseCounts)
+                                ? context.dataset.responseCounts
+                                : [];
+                              const responseCount = Number(counts[context.dataIndex] || 0);
+                              return `${context.dataset.label}: ${formatNumber(percentage, 1)}% (${responseCount})`;
+                            },
+                            afterBody: (items) => {
+                              if (!items || items.length === 0) return "";
+                              const dataIndex = items[0].dataIndex;
+                              const totalResponses = Number(
+                                derived.athleteTypeDailyDistribution.totalResponsesByDate[dataIndex] || 0,
+                              );
+                              return `Total: (${totalResponses})`;
+                            },
+                          },
+                        },
+                      },
+                      scales: {
+                        ...chartBaseOptions.scales,
+                        x: {
+                          ...chartBaseOptions.scales.x,
+                          stacked: true,
+                        },
+                        y: {
+                          ...chartBaseOptions.scales.y,
+                          stacked: true,
+                          max: 100,
+                          ticks: {
+                            ...chartBaseOptions.scales.y.ticks,
+                            callback: (value) => `${value}%`,
+                          },
+                        },
+                      },
+                    }}
+                  />
+                </div>
+                <p className="chart-footnote">
+                  Each day is normalized to 100%. Multi-select responses are counted
+                  separately; missing athlete types are excluded.
+                </p>
+              </>
+            )}
+          </div>
+
+          <div className="card chart-card">
+            <h3>Daily Coach Athlete-Type Mix (Counts)</h3>
+            {derived.athleteTypeDailyCoachMix.labels.length === 0 ? (
+              <p>No onboarding athlete-type responses in this range.</p>
+            ) : (
+              <>
+                <div className="chart-area">
+                  <Bar
+                    data={{
+                      labels: derived.athleteTypeDailyCoachMix.labels,
+                      datasets: [
+                        {
+                          label: "Only Powerlifting",
+                          data: derived.athleteTypeDailyCoachMix.onlyPowerlifting,
+                          backgroundColor: "rgba(63, 123, 141, 0.72)",
+                          borderRadius: 4,
+                        },
+                        {
+                          label: "Only Bodybuilding",
+                          data: derived.athleteTypeDailyCoachMix.onlyBodybuilding,
+                          backgroundColor: "rgba(99, 91, 255, 0.68)",
+                          borderRadius: 4,
+                        },
+                        {
+                          label: "Powerlifting + Bodybuilding",
+                          data: derived.athleteTypeDailyCoachMix.powerliftingAndBodybuilding,
+                          backgroundColor: "rgba(47, 182, 124, 0.68)",
+                          borderRadius: 4,
+                        },
+                        {
+                          label: "Other",
+                          data: derived.athleteTypeDailyCoachMix.other,
+                          backgroundColor: "rgba(214, 138, 66, 0.68)",
+                          borderRadius: 6,
+                        },
+                      ],
+                    }}
+                    options={{
+                      ...chartBaseOptions,
+                      scales: {
+                        ...chartBaseOptions.scales,
+                        x: {
+                          ...chartBaseOptions.scales.x,
+                          stacked: true,
+                        },
+                        y: {
+                          ...chartBaseOptions.scales.y,
+                          stacked: true,
+                        },
+                      },
+                    }}
+                  />
+                </div>
+                <p className="chart-footnote">
+                  Each coach is counted once per day based on their onboarding athlete-type selection.
+                </p>
+              </>
             )}
           </div>
         </div>
@@ -1161,9 +1425,27 @@ export default function App() {
           <div>
             <h2>Chapter 2: Signup to Paid Funnel</h2>
             <p className="muted">
-              Funnel steps and paid conversion come from coaches_public, with spend
-              from Meta to compute cost metrics.
+              Funnel and attribution counts come from coaches_public. Spend comes
+              from Meta and powers cost metrics where ad linkage exists.
             </p>
+          </div>
+        </div>
+
+        <div className="kpi-grid attribution-kpi-grid">
+          <div className="card kpi-card">
+            <h3>Tracked Signups</h3>
+            <div className="value">{derived.attributionTotals.trackedSignups}</div>
+            <div className="sub">Has <code>fbclid</code></div>
+          </div>
+          <div className="card kpi-card">
+            <h3>Inferred Signups</h3>
+            <div className="value">{derived.attributionTotals.inferredSignups}</div>
+            <div className="sub">No <code>fbclid</code>, country <code>US</code> or <code>GB</code></div>
+          </div>
+          <div className="card kpi-card">
+            <h3>Inferred Share</h3>
+            <div className="value">{formatPercent(inferredShare, 2)}</div>
+            <div className="sub">Inferred ÷ (tracked + inferred)</div>
           </div>
         </div>
 
@@ -1204,9 +1486,19 @@ export default function App() {
             <div className="sub">Spend ÷ signups</div>
           </div>
           <div className="card kpi-card">
+            <h3>Tracked Cost / Signup</h3>
+            <div className="value">{formatCurrency(trackedCostPerSignup, 2, metaCurrency)}</div>
+            <div className="sub">Spend ÷ tracked signups</div>
+          </div>
+          <div className="card kpi-card">
             <h3>CAC</h3>
             <div className="value">{formatCurrency(overallCac, 2, metaCurrency)}</div>
             <div className="sub">Spend ÷ paid</div>
+          </div>
+          <div className="card kpi-card">
+            <h3>Tracked CAC</h3>
+            <div className="value">{formatCurrency(trackedCac, 2, metaCurrency)}</div>
+            <div className="sub">Spend ÷ tracked paid</div>
           </div>
           <div className="card kpi-card">
             <h3>Estimated MRR</h3>
@@ -1316,23 +1608,23 @@ export default function App() {
 
           <div className="card chart-card">
             <h3>Cost per Signup vs CAC by Ad</h3>
-            {derived.topBySignups.length === 0 ? (
-              <p>No ad signups in this range.</p>
+            {topBySignupsWithMeta.length === 0 ? (
+              <p>No Meta-linked ad signups in this range.</p>
             ) : (
               <div className="chart-area">
                 <Bar
                   data={{
-                    labels: derived.topBySignups.map((row) => row.ad_id),
+                    labels: topBySignupsWithMeta.map((row) => row.ad_id),
                     datasets: [
                       {
                         label: "Cost per signup",
-                        data: derived.topBySignups.map((row) => row.costPerSignup || 0),
+                        data: topBySignupsWithMeta.map((row) => row.costPerSignup),
                         backgroundColor: "rgba(63, 123, 141, 0.62)",
                         borderRadius: 4,
                       },
                       {
                         label: "CAC",
-                        data: derived.topBySignups.map((row) => row.cac || 0),
+                        data: topBySignupsWithMeta.map((row) => row.cac),
                         backgroundColor: "rgba(206, 95, 127, 0.62)",
                         borderRadius: 4,
                       },
@@ -1364,6 +1656,8 @@ export default function App() {
                 <th>CTR</th>
                 <th>CPC</th>
                 <th>Signups</th>
+                <th>Tracked</th>
+                <th>Inferred</th>
                 <th>Invited</th>
                 <th>Viewed Block</th>
                 <th>Athlete App</th>
@@ -1378,29 +1672,37 @@ export default function App() {
             <tbody>
               {tableRows.length === 0 ? (
                 <tr>
-                  <td colSpan="18">No data for this range.</td>
+                  <td colSpan="20">No data for this range.</td>
                 </tr>
               ) : (
                 tableRows.map((row) => (
                   <tr key={row.id}>
-                    <td>{row.ad_id}</td>
-                    <td>{formatCurrency(row.spend, 2, metaCurrency)}</td>
-                    <td>{Math.round(row.impressions).toLocaleString()}</td>
-                    <td>{Math.round(row.clicks).toLocaleString()}</td>
-                    <td>{formatNumber(row.impressionsPerEuro, 1)}</td>
-                    <td>{formatNumber(row.clicksPerEuro, 2)}</td>
-                    <td>{formatPercent(row.ctr, 2)}</td>
-                    <td>{formatCurrency(row.cpc, 2, metaCurrency)}</td>
+                    <td>
+                      {row.ad_id === INFERRED_PAID_UNKNOWN
+                        ? `${INFERRED_PAID_UNKNOWN} (country-inferred)`
+                        : row.ad_id}
+                    </td>
+                    <td>{formatMetaLinkedMetric(row, () => formatCurrency(row.spend, 2, metaCurrency))}</td>
+                    <td>
+                      {formatMetaLinkedMetric(row, () => Math.round(row.impressions).toLocaleString())}
+                    </td>
+                    <td>{formatMetaLinkedMetric(row, () => Math.round(row.clicks).toLocaleString())}</td>
+                    <td>{formatMetaLinkedMetric(row, () => formatNumber(row.impressionsPerEuro, 1))}</td>
+                    <td>{formatMetaLinkedMetric(row, () => formatNumber(row.clicksPerEuro, 2))}</td>
+                    <td>{formatMetaLinkedMetric(row, () => formatPercent(row.ctr, 2))}</td>
+                    <td>{formatMetaLinkedMetric(row, () => formatCurrency(row.cpc, 2, metaCurrency))}</td>
                     <td>{row.signups}</td>
+                    <td>{row.tracked_signups}</td>
+                    <td>{row.inferred_signups}</td>
                     <td>{row.invited}</td>
                     <td>{row.blocked}</td>
                     <td>{row.athleteShown}</td>
                     <td>{row.paid}</td>
-                    <td>{formatPercent(row.clickToSignupRate, 2)}</td>
+                    <td>{formatMetaLinkedMetric(row, () => formatPercent(row.clickToSignupRate, 2))}</td>
                     <td>{formatPercent(row.paidRate, 2)}</td>
-                    <td>{formatCurrency(row.costPerSignup, 2, metaCurrency)}</td>
-                    <td>{formatCurrency(row.cac, 2, metaCurrency)}</td>
-                    <td>{formatNumber(row.roas, 2)}</td>
+                    <td>{formatMetaLinkedMetric(row, () => formatCurrency(row.costPerSignup, 2, metaCurrency))}</td>
+                    <td>{formatMetaLinkedMetric(row, () => formatCurrency(row.cac, 2, metaCurrency))}</td>
+                    <td>{formatMetaLinkedMetric(row, () => formatNumber(row.roas, 2))}</td>
                   </tr>
                 ))
               )}
@@ -1421,8 +1723,19 @@ export default function App() {
             and are preferred when both systems could overlap.
           </li>
           <li>
-            In <code>Ads only</code>, coaches are identified by a populated
-            <code>fbclid</code>.
+            In <code>Ads only</code>, coaches include tracked paid users
+            (populated <code>fbclid</code>) and inferred paid users
+            (missing <code>fbclid</code> with <code>signup_country_code</code> equal
+            to <code>US</code> or <code>GB</code>).
+          </li>
+          <li>
+            Coaches inferred via country without ad/adset/campaign metadata are
+            grouped as <code>{INFERRED_PAID_UNKNOWN}</code> to quantify paid volume
+            without assigning it to a specific ad creative.
+          </li>
+          <li>
+            For rows without Meta ad linkage, spend-based ad metrics are shown as
+            <code>N/A</code> to avoid false precision.
           </li>
         </ul>
       </section>
