@@ -20,6 +20,7 @@ import {
   computeAthleteTypeDailyCoachMix,
   computeAthleteTypeDailyDistribution,
 } from "./athleteTypeDistribution";
+import TasksPage from "./TasksPage";
 
 ChartJS.register(
   CategoryScale,
@@ -33,7 +34,29 @@ ChartJS.register(
   Filler,
 );
 
-const ANALYTICS_ADMIN_UID = "B2Xm8CFPyIS2taVlusbcIicWItF3";
+const ANALYTICS_ADMIN_UIDS = new Set([
+  "B2Xm8CFPyIS2taVlusbcIicWItF3",
+  ...(import.meta.env.VITE_ANALYTICS_ADMIN_UIDS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+]);
+
+const ANALYTICS_ADMIN_EMAILS = new Set(
+  (import.meta.env.VITE_ANALYTICS_ADMIN_EMAILS || "testec202405@gmail.com")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean),
+);
+
+function isAnalyticsAdmin(currentUser) {
+  if (!currentUser) return false;
+  const uidAllowed = ANALYTICS_ADMIN_UIDS.has(currentUser.uid);
+  const email = (currentUser.email || "").toLowerCase();
+  const emailAllowed = email ? ANALYTICS_ADMIN_EMAILS.has(email) : false;
+  return uidAllowed || emailAllowed;
+}
+
 const META_CALLABLE_NAME = "getMetaInsights";
 const META_CACHE_TTL_MS = 20 * 60 * 1000;
 
@@ -340,6 +363,108 @@ function computeAdMetrics(row) {
   };
 }
 
+const APP_ROUTES = {
+  analytics: "/",
+  tasks: "/tasks",
+};
+
+const DEMO_USER = {
+  email: "demo@efort.center",
+  displayName: "Ben (demo)",
+};
+
+function normalizeRoute(pathname) {
+  if (pathname === APP_ROUTES.tasks) return APP_ROUTES.tasks;
+  return APP_ROUTES.analytics;
+}
+
+function AnalyticsIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true" className="site-nav-icon-svg">
+      <path d="M4 15.5h2.2V8H4v7.5Zm4.9 0h2.2V4.5H8.9v11Zm4.9 0H16V10h-2.2v5.5Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function TasksIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true" className="site-nav-icon-svg">
+      <path d="M4.25 5.25A1.25 1.25 0 0 1 5.5 4h1a1.25 1.25 0 1 1 0 2.5h-1a1.25 1.25 0 0 1-1.25-1.25Zm0 4.75A1.25 1.25 0 0 1 5.5 8.75h1a1.25 1.25 0 1 1 0 2.5h-1A1.25 1.25 0 0 1 4.25 10Zm0 4.75A1.25 1.25 0 0 1 5.5 13.5h1a1.25 1.25 0 1 1 0 2.5h-1a1.25 1.25 0 0 1-1.25-1.25ZM9 5.25c0-.41.34-.75.75-.75h5.5a.75.75 0 0 1 0 1.5h-5.5A.75.75 0 0 1 9 5.25Zm0 4.75c0-.41.34-.75.75-.75h5.5a.75.75 0 0 1 0 1.5h-5.5A.75.75 0 0 1 9 10Zm0 4.75c0-.41.34-.75.75-.75h5.5a.75.75 0 0 1 0 1.5h-5.5a.75.75 0 0 1-.75-.75Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function AccountIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true" className="account-icon-svg">
+      <path d="M10 10a3.2 3.2 0 1 0 0-6.4A3.2 3.2 0 0 0 10 10Zm0 1.6c-3.1 0-5.6 1.7-5.6 3.8v.6h11.2v-.6c0-2.1-2.5-3.8-5.6-3.8Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function SiteMenu({currentRoute, onNavigate, sessionUser, onSignOut, showSignOut}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const items = [
+    {path: APP_ROUTES.analytics, label: "Analytics", icon: <AnalyticsIcon />},
+    {path: APP_ROUTES.tasks, label: "Tasks", icon: <TasksIcon />},
+  ];
+
+  return (
+    <aside className="site-menu">
+      <div>
+        <div className="site-menu-header">
+          <div className="eyebrow">Workspace</div>
+          <h2>EFORT CENTER</h2>
+        </div>
+        <nav className="site-nav" aria-label="Sections">
+          {items.map((item) => {
+            const active = currentRoute === item.path;
+            return (
+              <button
+                key={item.path}
+                type="button"
+                className={active ? "site-nav-link active" : "site-nav-link"}
+                onClick={() => onNavigate(item.path)}
+              >
+                <span className="site-nav-icon">{item.icon}</span>
+                <span className="site-nav-title">{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+      </div>
+
+      {sessionUser ? (
+        <div className="site-menu-footer">
+          <button
+            type="button"
+            className={menuOpen ? "account-button active" : "account-button"}
+            onClick={() => setMenuOpen((value) => !value)}
+          >
+            <span className="account-icon"><AccountIcon /></span>
+            <span className="account-copy">
+              <span className="account-label">Account</span>
+              <span className="account-email">{sessionUser.email}</span>
+            </span>
+          </button>
+
+          {menuOpen ? (
+            <div className="account-menu">
+              {showSignOut ? (
+                <button type="button" className="account-menu-item" onClick={onSignOut}>
+                  Sign out
+                </button>
+              ) : (
+                <div className="account-menu-note">Demo session</div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </aside>
+  );
+}
+
 export default function App() {
   const today = new Date();
   const defaultEnd = formatDateInput(today);
@@ -364,8 +489,16 @@ export default function App() {
   const [adsetFilter, setAdsetFilter] = useState("all");
   const [campaignFilter, setCampaignFilter] = useState("all");
   const [adFilter, setAdFilter] = useState("all");
+  const [currentRoute, setCurrentRoute] = useState(() => normalizeRoute(window.location.pathname));
 
   useEffect(() => {
+    if (!auth) {
+      setAuthReady(true);
+      setUser(null);
+      setIsAdmin(false);
+      return undefined;
+    }
+
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser || null);
       setAuthReady(true);
@@ -373,10 +506,25 @@ export default function App() {
         setIsAdmin(false);
         return;
       }
-      setIsAdmin(currentUser.uid === ANALYTICS_ADMIN_UID);
+      setIsAdmin(isAnalyticsAdmin(currentUser));
     });
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setCurrentRoute(normalizeRoute(window.location.pathname));
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  const navigateTo = (path) => {
+    if (normalizeRoute(window.location.pathname) === path) return;
+    window.history.pushState({}, "", path);
+    setCurrentRoute(path);
+  };
 
   const fetchMetaInsights = async ({since, until, forceRefresh = false}) => {
     if (!functions) {
@@ -922,6 +1070,10 @@ export default function App() {
 
   const handleSignIn = async () => {
     setError("");
+    if (!auth || !googleProvider) {
+      setError("Firebase Auth is not initialized.");
+      return;
+    }
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
@@ -930,13 +1082,69 @@ export default function App() {
   };
 
   const handleSignOut = async () => {
+    if (!auth) return;
     await signOut(auth);
   };
 
-  if (!authReady) {
+  const isOperationsRoute = currentRoute === APP_ROUTES.tasks;
+  const tasksBackend = import.meta.env.VITE_TASKS_BACKEND || "firebase";
+  const operationsDemoEnabled = isOperationsRoute && tasksBackend === "mock";
+  const sessionUser = operationsDemoEnabled && !user ? DEMO_USER : user;
+
+  if (!authReady && !operationsDemoEnabled) {
     return (
       <div className="app-shell">
         <div className="card">Loading authentication...</div>
+      </div>
+    );
+  }
+
+  if (isOperationsRoute) {
+    if (!sessionUser) {
+      return (
+        <div className="app-shell">
+          <div className="card auth-card">
+            <div className="eyebrow">Internal operations</div>
+            <h1>Efort Center</h1>
+            <p>Sign in with Google to access tasks and templates.</p>
+            <button className="primary" onClick={handleSignIn}>
+              Sign in with Google
+            </button>
+            {error && <p className="error">{error}</p>}
+          </div>
+        </div>
+      );
+    }
+
+    if (!operationsDemoEnabled && !isAdmin) {
+      return (
+        <div className="app-shell">
+          <div className="card auth-card">
+            <div className="eyebrow">Access denied</div>
+            <h1>Efort Center</h1>
+            <p>Your account is not authorized for this workspace.</p>
+            <button className="secondary" onClick={handleSignOut}>
+              Sign out
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="operations-shell">
+        <SiteMenu
+          currentRoute={currentRoute}
+          onNavigate={navigateTo}
+          sessionUser={sessionUser}
+          onSignOut={handleSignOut}
+          showSignOut={!operationsDemoEnabled}
+        />
+        <div className="operations-main">
+          <main className="page-shell">
+            <TasksPage />
+          </main>
+        </div>
       </div>
     );
   }
@@ -973,20 +1181,16 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
-      <header className="top-bar">
-        <div>
-          <div className="eyebrow">Efort internal analytics</div>
-          <h1>Ad Funnel Dashboard</h1>
-        </div>
-        <div className="top-bar-actions">
-          <span className="user-pill">{user.email}</span>
-          <button className="secondary" onClick={handleSignOut}>
-            Sign out
-          </button>
-        </div>
-      </header>
-
+    <div className="operations-shell">
+      <SiteMenu
+        currentRoute={currentRoute}
+        onNavigate={navigateTo}
+        sessionUser={user}
+        onSignOut={handleSignOut}
+        showSignOut
+      />
+      <div className="operations-main">
+        <main className="page-shell">
       <section className="controls card">
         <div className="scope-control">
           <label>Audience</label>
@@ -1739,6 +1943,8 @@ export default function App() {
           </li>
         </ul>
       </section>
+        </main>
+      </div>
     </div>
   );
 }

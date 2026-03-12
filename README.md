@@ -1,47 +1,102 @@
 # Efort Center
 
-Internal analytics dashboard for Efort. Built with React + Vite and secured by Firebase Auth + Firestore rules.
+Internal dashboard for Efort Center.
 
-## Setup
+## What is in here
 
-1. Copy `.env.example` to `.env` and fill in Firebase web config values. (Vite requires env vars to be prefixed with `VITE_`.)
-2. Install dependencies:
+- **Analytics dashboard** backed by Firebase Auth + Firestore
+- **Tasks workspace** backed by Supabase, exposed through Firebase callable functions
+- **Site menu** with:
+  - `/` → Analytics
+  - `/tasks` → Tasks
+
+## Frontend setup
+
+1. Copy `.env.example` to `.env`
+2. Fill the Firebase web config values
+3. Install dependencies
    ```bash
    npm install
    ```
-3. Run locally:
+4. Run locally
    ```bash
    npm run dev
    ```
 
-## Firebase
+### Local demo mode (optional)
 
-- Firestore collection: `analytics_ads_daily`
-- Admin whitelist: `internal_admins/{uid}`
+If you want the `/tasks` workspace to use mock/demo data during local development only, put this in `.env.development.local`:
 
-## Build & Deploy
+```bash
+VITE_TASKS_BACKEND=mock
+```
 
-1. Build the app:
-   ```bash
-   npm run build
-   ```
-2. Deploy hosting:
-   ```bash
-   firebase deploy --only hosting --project efort-app
-   ```
+Do **not** use `.env.local` for this, because Vite also loads it during production builds.
 
-## Access
+## Supabase setup
 
-Only users with an `internal_admins/{uid}` doc can access the dashboard.
+1. Create/select the Supabase project for **Efort Center**
+2. Open the SQL editor
+3. Run:
+   - `supabase/efort_center_setup.sql`
 
-## Athlete Type Response Mix
+This creates:
+- `task_owners`
+- `tasks`
+- `task_events`
 
-- Data source: `coaches_public.onboarding_athletes_types`
-- Accepted values: `powerlifters`, `bodybuilders`, `other`
-- Ratio definition: daily response share (each day is normalized to 100%; multi-select answers are counted separately)
-- Missing-data policy: coaches with missing/invalid athlete types are excluded from this chart
-- Additional daily counts chart buckets:
-  - only `powerlifters`
-  - only `bodybuilders`
-  - `powerlifters` + `bodybuilders` (without `other`)
-  - any selection including `other`
+It also seeds:
+- `Ben`
+- `Barney`
+
+## Firebase Functions setup
+
+Install function deps:
+
+```bash
+cd functions
+npm install
+cd ..
+```
+
+Set Firebase function secrets:
+
+```bash
+firebase functions:secrets:set SUPABASE_URL
+firebase functions:secrets:set SUPABASE_SERVICE_ROLE_KEY
+firebase functions:secrets:set TASKS_ADMIN_EMAILS
+```
+
+Recommended value for `TASKS_ADMIN_EMAILS`:
+- comma-separated admin emails allowed to create/update tasks
+
+## Deploy
+
+Deploy the task functions:
+
+```bash
+firebase deploy --only functions:listTaskOwners,functions:listTaskTemplates,functions:listTaskSchedules,functions:listTasks,functions:createTask,functions:updateTask,functions:saveTaskSchedule,functions:createTaskTemplate,functions:updateTaskTemplate,functions:deleteTaskTemplate,functions:createTaskFromTemplate --project efort-app
+```
+
+Deploy hosting:
+
+```bash
+npm run deploy:hosting
+```
+
+`deploy:hosting` forces `VITE_TASKS_BACKEND=firebase` so production does not accidentally ship the local mock backend.
+
+## Architecture
+
+### Analytics
+- Firebase Auth
+- Firestore reads directly in the client
+- existing callable: `getMetaInsights`
+
+### Tasks
+- Firebase Auth in the client
+- Firebase callable functions as the secure backend layer
+- Supabase Postgres as the task system of record
+- Supabase service role stays server-side only
+
+This keeps the app secure without exposing privileged Supabase access in the browser.
