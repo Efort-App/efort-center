@@ -295,6 +295,10 @@ button.secondary:hover {
   color: var(--text-secondary);
 }
 
+.subsection-header {
+  margin-top: 1.5rem;
+}
+
 /* --- KPI Grid --- */
 .kpi-grid {
   display: grid;
@@ -433,6 +437,22 @@ button.secondary:hover {
 
 .table-scroll tbody tr:hover {
   background: var(--bg-hover);
+}
+
+.compact-table-card {
+  padding-bottom: 0.75rem;
+}
+
+.compact-table-footnote {
+  padding: 0 1.25rem;
+}
+
+.numeric-cell {
+  text-align: right;
+}
+
+.organic-selection-footnote {
+  margin-top: 0.75rem;
 }
 
 /* --- Notes & Status --- */
