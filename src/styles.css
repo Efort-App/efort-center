@@ -738,6 +738,18 @@ button.danger:hover {
 
 .feedback-subtitle {
   color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.feedback-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.feedback-header-copy {
+  min-width: 0;
 }
 
 .feedback-subtitle code {
@@ -761,13 +773,22 @@ button.danger:hover {
 .feedback-item-meta {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
+  gap: 0.75rem;
 }
 
 .feedback-item-date {
   color: var(--text-secondary);
   font-size: 0.6875rem;
   letter-spacing: 0.03em;
+}
+
+.feedback-item-coach-id {
+  color: var(--text-tertiary);
+  font-size: 0.6875rem;
+  font-family: "Menlo", "Monaco", monospace;
+  letter-spacing: 0.02em;
+  margin-left: auto;
 }
 
 .feedback-item-text {
@@ -807,7 +828,8 @@ button.danger:hover {
   display: flex;
   gap: 0.75rem;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  margin-left: auto;
 }
 
 .tasks-summary-strip {
@@ -1613,6 +1635,7 @@ button.danger:hover {
 @media (max-width: 768px) {
   .top-bar,
   .tasks-header-panel,
+  .feedback-header,
   .tasks-hero-meta,
   .tasks-controls-left,
   .tasks-controls-right,

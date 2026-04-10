@@ -9,7 +9,7 @@ import {
 import {buildCsvContent} from "./tableExport";
 
 const FEEDBACK_COLLECTION = "feedback";
-const INITIAL_FEEDBACK_COUNT = 5;
+const FEEDBACK_PAGE_SIZE = 5;
 
 export default function FeedbackPage() {
   const [entries, setEntries] = useState([]);
@@ -33,17 +33,17 @@ export default function FeedbackPage() {
       const feedbackQuery = query(
         collection(db, FEEDBACK_COLLECTION),
         orderBy("timestamp", "desc"),
-        limit(INITIAL_FEEDBACK_COUNT + 1),
+        limit(FEEDBACK_PAGE_SIZE + 1),
       );
       const snapshot = await getDocs(feedbackQuery);
-      const visibleDocs = snapshot.docs.slice(0, INITIAL_FEEDBACK_COUNT);
+      const visibleDocs = snapshot.docs.slice(0, FEEDBACK_PAGE_SIZE);
       const records = visibleDocs.map((docSnap) => ({
         id: docSnap.id,
         ...docSnap.data(),
       }));
 
       setEntries(normalizeFeedbackEntries(records));
-      setHasMore(snapshot.docs.length > INITIAL_FEEDBACK_COUNT);
+      setHasMore(snapshot.docs.length > FEEDBACK_PAGE_SIZE);
       setLastVisibleDoc(visibleDocs.at(-1) || null);
     } catch (err) {
       setEntries([]);
@@ -66,16 +66,18 @@ export default function FeedbackPage() {
         collection(db, FEEDBACK_COLLECTION),
         orderBy("timestamp", "desc"),
         startAfter(lastVisibleDoc),
+        limit(FEEDBACK_PAGE_SIZE + 1),
       );
       const snapshot = await getDocs(feedbackQuery);
-      const records = snapshot.docs.map((docSnap) => ({
+      const visibleDocs = snapshot.docs.slice(0, FEEDBACK_PAGE_SIZE);
+      const records = visibleDocs.map((docSnap) => ({
         id: docSnap.id,
         ...docSnap.data(),
       }));
 
-      setEntries((current) => normalizeFeedbackEntries([...current, ...records]));
-      setHasMore(false);
-      setLastVisibleDoc(snapshot.docs.at(-1) || lastVisibleDoc);
+      setEntries((current) => [...current, ...normalizeFeedbackEntries(records)]);
+      setHasMore(snapshot.docs.length > FEEDBACK_PAGE_SIZE);
+      setLastVisibleDoc(visibleDocs.at(-1) || lastVisibleDoc);
     } catch (err) {
       setError(err?.message || "Failed to load more feedback.");
     } finally {
@@ -146,25 +148,24 @@ export default function FeedbackPage() {
   return (
     <div className="feedback-page">
       <section className="card tasks-hero">
-        <div>
-          <div className="eyebrow">Customer input</div>
-          <h2>Feedback</h2>
-          <p className="feedback-subtitle">
-            Latest entries from the Firebase <code>feedback</code> collection, sorted by timestamp.
-          </p>
-        </div>
-        <div className="tasks-hero-meta">
-          <span className="user-pill">
-            {loading ? "Loading…" : `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`}
-          </span>
-          <button
-            className="secondary"
-            type="button"
-            onClick={handleCopyAll}
-            disabled={loading || loadingMore || copying}
-          >
-            {copying ? "Copying…" : "Copy all"}
-          </button>
+        <div className="feedback-header">
+          <div className="feedback-header-copy">
+            <div className="eyebrow">Customer input</div>
+            <h2>Feedback</h2>
+            <p className="feedback-subtitle">
+              Latest entries from the Firebase <code>feedback</code> collection, sorted by timestamp.
+            </p>
+          </div>
+          <div className="tasks-hero-meta">
+            <button
+              className="secondary"
+              type="button"
+              onClick={handleCopyAll}
+              disabled={loading || loadingMore || copying}
+            >
+              {copying ? "Copying…" : "Copy all"}
+            </button>
+          </div>
         </div>
       </section>
 
@@ -201,6 +202,9 @@ export default function FeedbackPage() {
                   <span className="feedback-item-date">
                     {formatFeedbackTimestamp(entry.timestampMs)}
                   </span>
+                  {entry.coach_id ? (
+                    <span className="feedback-item-coach-id">{entry.coach_id}</span>
+                  ) : null}
                 </div>
                 <p className="feedback-item-text">{entry.displayText}</p>
               </article>

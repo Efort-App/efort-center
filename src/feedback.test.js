@@ -35,7 +35,7 @@ describe("resolveTimestampMillis", () => {
 });
 
 describe("normalizeFeedbackEntries", () => {
-  it("sorts entries by newest first and removes blank feedback", () => {
+  it("preserves input order and removes blank feedback", () => {
     assert.deepEqual(
       normalizeFeedbackEntries([
         {id: "older", text: "Old", timestamp: 1_710_000_000},
@@ -44,20 +44,20 @@ describe("normalizeFeedbackEntries", () => {
       ]),
       [
         {
-          id: "newer",
-          source: "",
-          text: "New",
-          displayText: "New",
-          coach_id: "",
-          timestampMs: 1_720_000_000_000,
-        },
-        {
           id: "older",
           source: "",
           text: "Old",
           displayText: "Old",
           coach_id: "",
           timestampMs: 1_710_000_000_000,
+        },
+        {
+          id: "newer",
+          source: "",
+          text: "New",
+          displayText: "New",
+          coach_id: "",
+          timestampMs: 1_720_000_000_000,
         },
       ],
     );

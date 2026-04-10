@@ -90,8 +90,7 @@ export function normalizeFeedbackEntries(records) {
 
   return records
     .map((record, index) => normalizeFeedbackEntry(record, index))
-    .filter((record) => record.text)
-    .sort((left, right) => right.timestampMs - left.timestampMs);
+    .filter((record) => record.text);
 }
 
 export function formatFeedbackTimestamp(timestampMs) {
