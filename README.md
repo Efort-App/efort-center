@@ -21,7 +21,7 @@ In `/tasks`, tasks can be created from the board and deleted from the task detai
 npm install
 ```
 
-3. Run locally:
+1. Run locally:
 
 ```bash
 npm run dev
@@ -106,3 +106,4 @@ npm run deploy:hosting
 - `Copy all` copies CSV to the clipboard with `source`, `text`, `coach_id`, and `timestamp`.
 - The page renders the feedback body from `text`, with fallbacks for `feedback`, `message`, and `content`.
 - When a feedback document has `source`, the UI prefixes the text as `[SOURCE] ...`.
+

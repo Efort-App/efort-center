@@ -1697,7 +1697,6 @@ export default function App() {
     {label: "CTA Text", cell: (row) => formatMetaLinkedMetric(row, () => formatCallToActionText(row.cta_text) || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCallToActionText(row.cta_text) || "-")},
     {label: "Creative", cell: (row) => renderCreativeCell(row), csvValue: (row) => formatMetaLinkedMetric(row, () => row.creative_name || row.creative_id || "-")},
     {label: "Creative ID", cell: (row) => formatMetaLinkedMetric(row, () => row.creative_id || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.creative_id || "-")},
-    {label: "Creative Thumbnail URL", cell: (row) => formatMetaLinkedMetric(row, () => row.creative_thumbnail_url || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.creative_thumbnail_url || "-")},
     {label: "UTM", cell: (row) => formatMetaLinkedMetric(row, () => row.url_tags || extractUtmString(row.final_url) || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.url_tags || extractUtmString(row.final_url) || "-")},
     {label: "Post ID", cell: (row) => formatMetaLinkedMetric(row, () => row.post_id || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.post_id || "-")},
     {label: "Preview Link", cell: (row) => formatMetaLinkedMetric(row, () => row.post_permalink || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.post_permalink || "-")},
