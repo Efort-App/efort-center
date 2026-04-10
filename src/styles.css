@@ -295,6 +295,10 @@ button.secondary:hover {
   color: var(--text-secondary);
 }
 
+.subsection-header {
+  margin-top: 1.5rem;
+}
+
 /* --- KPI Grid --- */
 .kpi-grid {
   display: grid;
@@ -396,6 +400,19 @@ button.secondary:hover {
   border-bottom: 1px solid var(--border);
 }
 
+.table-meta {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.table-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .table-scroll {
   overflow-x: auto;
   width: 100%;
@@ -427,12 +444,45 @@ button.secondary:hover {
   white-space: nowrap;
 }
 
+.creative-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 180px;
+}
+
+.creative-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  flex: 0 0 auto;
+}
+
 .table-scroll tbody tr:last-child td {
   border-bottom: none;
 }
 
 .table-scroll tbody tr:hover {
   background: var(--bg-hover);
+}
+
+.compact-table-card {
+  padding-bottom: 0.75rem;
+}
+
+.compact-table-footnote {
+  padding: 0 1.25rem;
+}
+
+.numeric-cell {
+  text-align: right;
+}
+
+.organic-selection-footnote {
+  margin-top: 0.75rem;
 }
 
 /* --- Notes & Status --- */
