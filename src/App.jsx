@@ -16,10 +16,20 @@ import {
 } from "chart.js";
 import {Bar, Line} from "react-chartjs-2";
 import {auth, db, functions, googleProvider} from "./firebase";
+import {hasDashboardAccess} from "./accessControl";
 import {
   computeAthleteTypeDailyCoachMix,
   computeAthleteTypeDailyDistribution,
+  normalizeAthleteTypes,
 } from "./athleteTypeDistribution";
+import {buildAssetBaseName, downloadAssetZip} from "./assetExport";
+import {formatCallToActionText, resolveOptimizationEventLabel} from "./metaAdEnrichment";
+import {
+  rollupAdsetResultMetrics,
+  resolveInternalCostPerResult,
+  resolveInternalResultCount,
+} from "./resultMetrics";
+import {downloadCsv} from "./tableExport";
 
 ChartJS.register(
   CategoryScale,
@@ -33,9 +43,9 @@ ChartJS.register(
   Filler,
 );
 
-const ANALYTICS_ADMIN_UID = "B2Xm8CFPyIS2taVlusbcIicWItF3";
 const META_CALLABLE_NAME = "getMetaInsights";
 const META_CACHE_TTL_MS = 20 * 60 * 1000;
+const META_CACHE_ENABLED = true;
 
 const palette = {
   brand: "#3f7b8d",
@@ -63,7 +73,26 @@ const adKeyAliases = {};
 const adsetKeyAliases = {};
 const campaignKeyAliases = {};
 const INFERRED_PAID_UNKNOWN = "inferred_paid_unknown";
+const UNKNOWN_ADSET = "unknown_adset";
 const INFERRED_PAID_COUNTRY_CODES = new Set(["US", "GB"]);
+const ZERO_DECIMAL_CURRENCIES = new Set([
+  "BIF",
+  "CLP",
+  "DJF",
+  "GNF",
+  "JPY",
+  "KMF",
+  "KRW",
+  "MGA",
+  "PYG",
+  "RWF",
+  "UGX",
+  "VND",
+  "VUV",
+  "XAF",
+  "XOF",
+  "XPF",
+]);
 
 function formatDateInput(date) {
   return date.toISOString().slice(0, 10);
@@ -97,6 +126,200 @@ function formatCurrency(value, digits = 0, currency = "EUR") {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   }).format(numberValue);
+}
+
+function readNullableString(value) {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim();
+  return normalized ? normalized : null;
+}
+
+function readNullableNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function formatMetaResultCountValue(value) {
+  const numberValue = readNullableNumber(value);
+  return numberValue === null ? "-" : Math.round(numberValue).toLocaleString();
+}
+
+function formatMetaDateTime(value, timezone) {
+  const normalized = readNullableString(value);
+  if (!normalized) return "-";
+
+  let dateValue;
+  if (/^\d+$/.test(normalized)) {
+    const numericValue = Number(normalized);
+    const milliseconds = normalized.length <= 10 ? numericValue * 1000 : numericValue;
+    dateValue = new Date(milliseconds);
+  } else {
+    dateValue = new Date(normalized);
+  }
+
+  if (Number.isNaN(dateValue.getTime())) return normalized;
+
+  return new Intl.DateTimeFormat("en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: timezone || undefined,
+  }).format(dateValue);
+}
+
+function formatMetaEndTime(value, timezone) {
+  return readNullableString(value) ? formatMetaDateTime(value, timezone) : "Ongoing";
+}
+
+function readStringList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => readNullableString(item)).filter(Boolean);
+}
+
+function getCurrencyMinorUnitDivisor(currency) {
+  return ZERO_DECIMAL_CURRENCIES.has(currency) ? 1 : 100;
+}
+
+function formatMinorUnitCurrency(value, currency = "EUR", digits = 2) {
+  if (value === null || value === undefined) return "-";
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) return "-";
+  return formatCurrency(numberValue / getCurrencyMinorUnitDivisor(currency), digits, currency);
+}
+
+function formatListValue(values) {
+  return Array.isArray(values) && values.length > 0 ? values.join(", ") : "-";
+}
+
+function formatListCsv(values) {
+  return Array.isArray(values) && values.length > 0 ? values.join(" | ") : "";
+}
+
+function formatAttributionSpecValue(specs) {
+  if (!Array.isArray(specs) || specs.length === 0) return "-";
+  const parts = specs
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const eventType = readNullableString(item.event_type);
+      const windowDays = Number(item.window_days);
+      if (eventType && Number.isFinite(windowDays) && windowDays > 0) {
+        return `${eventType}:${windowDays}d`;
+      }
+      if (eventType) return eventType;
+      return null;
+    })
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : "-";
+}
+
+function extractUtmString(finalUrl) {
+  const normalized = readNullableString(finalUrl);
+  if (!normalized) return null;
+  try {
+    const url = new URL(normalized);
+    const utmEntries = Array.from(url.searchParams.entries()).filter(([key]) =>
+      key.toLowerCase().startsWith("utm_"),
+    );
+    if (utmEntries.length === 0) return null;
+    return utmEntries.map(([key, value]) => `${key}=${value}`).join("&");
+  } catch {
+    return null;
+  }
+}
+
+function mergeTextValue(currentValue, incomingValue) {
+  return readNullableString(currentValue) || readNullableString(incomingValue) || null;
+}
+
+function mergeListValue(currentValue, incomingValue) {
+  const currentList = readStringList(currentValue);
+  if (currentList.length > 0) return currentList;
+  return readStringList(incomingValue);
+}
+
+function mergeAttributionSpec(currentValue, incomingValue) {
+  if (Array.isArray(currentValue) && currentValue.length > 0) return currentValue;
+  return Array.isArray(incomingValue) ? incomingValue : [];
+}
+
+function mergeNumberValue(currentValue, incomingValue) {
+  const currentNumber = Number(currentValue);
+  if (Number.isFinite(currentNumber) && currentNumber > 0) return currentNumber;
+  const incomingNumber = Number(incomingValue);
+  return Number.isFinite(incomingNumber) ? incomingNumber : 0;
+}
+
+function mergeNullableNumberValue(currentValue, incomingValue) {
+  const currentNumber = readNullableNumber(currentValue);
+  if (currentNumber !== null) return currentNumber;
+  return readNullableNumber(incomingValue);
+}
+
+function hydrateMetaConfiguration(target, source) {
+  if (!source) return target;
+
+  target.ad_name = mergeTextValue(target.ad_name, source.ad_name);
+  target.ad_status = mergeTextValue(target.ad_status, source.ad_status);
+  target.ad_effective_status = mergeTextValue(target.ad_effective_status, source.ad_effective_status);
+  target.primary_text = mergeTextValue(target.primary_text, source.primary_text);
+  target.headline = mergeTextValue(target.headline, source.headline);
+  target.description = mergeTextValue(target.description, source.description);
+  target.cta_text = mergeTextValue(target.cta_text, source.cta_text);
+  target.creative_id = mergeTextValue(target.creative_id, source.creative_id);
+  target.creative_name = mergeTextValue(target.creative_name, source.creative_name);
+  target.creative_asset_url = mergeTextValue(target.creative_asset_url, source.creative_asset_url);
+  target.creative_thumbnail_url = mergeTextValue(
+    target.creative_thumbnail_url,
+    source.creative_thumbnail_url,
+  );
+  target.final_url = mergeTextValue(target.final_url, source.final_url);
+  target.url_tags = mergeTextValue(target.url_tags, source.url_tags);
+  target.post_id = mergeTextValue(target.post_id, source.post_id);
+  target.post_permalink = mergeTextValue(target.post_permalink, source.post_permalink);
+  target.adset_name = mergeTextValue(target.adset_name, source.adset_name);
+  target.adset_status = mergeTextValue(target.adset_status, source.adset_status);
+  target.adset_effective_status = mergeTextValue(
+    target.adset_effective_status,
+    source.adset_effective_status,
+  );
+  target.optimization_goal = mergeTextValue(target.optimization_goal, source.optimization_goal);
+  target.optimization_event = mergeTextValue(target.optimization_event, source.optimization_event);
+  target.billing_event = mergeTextValue(target.billing_event, source.billing_event);
+  target.bid_strategy = mergeTextValue(target.bid_strategy, source.bid_strategy);
+  target.bid_amount = mergeNumberValue(target.bid_amount, source.bid_amount);
+  target.daily_budget = mergeNumberValue(target.daily_budget, source.daily_budget);
+  target.lifetime_budget = mergeNumberValue(target.lifetime_budget, source.lifetime_budget);
+  target.attribution_spec = mergeAttributionSpec(target.attribution_spec, source.attribution_spec);
+  target.publisher_platforms = mergeListValue(target.publisher_platforms, source.publisher_platforms);
+  target.facebook_positions = mergeListValue(target.facebook_positions, source.facebook_positions);
+  target.instagram_positions = mergeListValue(target.instagram_positions, source.instagram_positions);
+  target.device_platforms = mergeListValue(target.device_platforms, source.device_platforms);
+  target.countries = mergeListValue(target.countries, source.countries);
+  target.start_time = mergeTextValue(target.start_time, source.start_time);
+  target.end_time = mergeTextValue(target.end_time, source.end_time);
+  target.campaign_name = mergeTextValue(target.campaign_name, source.campaign_name);
+  target.campaign_objective = mergeTextValue(target.campaign_objective, source.campaign_objective);
+  target.campaign_status = mergeTextValue(target.campaign_status, source.campaign_status);
+  target.campaign_effective_status = mergeTextValue(
+    target.campaign_effective_status,
+    source.campaign_effective_status,
+  );
+  target.campaign_buying_type = mergeTextValue(
+    target.campaign_buying_type,
+    source.campaign_buying_type,
+  );
+  target.reach = mergeNumberValue(target.reach, source.reach);
+  target.outbound_clicks = mergeNumberValue(target.outbound_clicks, source.outbound_clicks);
+  target.unique_outbound_clicks = mergeNumberValue(
+    target.unique_outbound_clicks,
+    source.unique_outbound_clicks,
+  );
+  target.frequency = mergeNumberValue(target.frequency, source.frequency);
+  target.cpm = mergeNumberValue(target.cpm, source.cpm);
+  target.result_count = mergeNullableNumberValue(target.result_count, source.result_count);
+  target.cost_per_result = mergeNullableNumberValue(target.cost_per_result, source.cost_per_result);
+
+  return target;
 }
 
 function formatMetaLinkedMetric(row, formatter) {
@@ -203,9 +426,54 @@ function parseMetaRow(row) {
     ad_id: adId,
     adset_id: adsetId,
     campaign_id: campaignId,
+    ad_name: readNullableString(row.ad_name),
+    ad_status: readNullableString(row.ad_status),
+    ad_effective_status: readNullableString(row.ad_effective_status),
+    primary_text: readNullableString(row.primary_text),
+    headline: readNullableString(row.headline),
+    description: readNullableString(row.description),
+    cta_text: readNullableString(row.cta_text),
+    creative_id: readNullableString(row.creative_id),
+    creative_name: readNullableString(row.creative_name),
+    creative_asset_url: readNullableString(row.creative_asset_url),
+    creative_thumbnail_url: readNullableString(row.creative_thumbnail_url),
+    final_url: readNullableString(row.final_url),
+    url_tags: readNullableString(row.url_tags),
+    post_id: readNullableString(row.post_id),
+    post_permalink: readNullableString(row.post_permalink),
+    adset_name: readNullableString(row.adset_name),
+    adset_status: readNullableString(row.adset_status),
+    adset_effective_status: readNullableString(row.adset_effective_status),
+    optimization_goal: readNullableString(row.optimization_goal),
+    optimization_event: resolveOptimizationEventLabel(row),
+    billing_event: readNullableString(row.billing_event),
+    bid_strategy: readNullableString(row.bid_strategy),
+    bid_amount: toNumber(row.bid_amount),
+    daily_budget: toNumber(row.daily_budget),
+    lifetime_budget: toNumber(row.lifetime_budget),
+    attribution_spec: Array.isArray(row.attribution_spec) ? row.attribution_spec : [],
+    publisher_platforms: readStringList(row.publisher_platforms),
+    facebook_positions: readStringList(row.facebook_positions),
+    instagram_positions: readStringList(row.instagram_positions),
+    device_platforms: readStringList(row.device_platforms),
+    countries: readStringList(row.countries),
+    start_time: readNullableString(row.start_time),
+    end_time: readNullableString(row.end_time),
+    campaign_name: readNullableString(row.campaign_name),
+    campaign_objective: readNullableString(row.campaign_objective),
+    campaign_status: readNullableString(row.campaign_status),
+    campaign_effective_status: readNullableString(row.campaign_effective_status),
+    campaign_buying_type: readNullableString(row.campaign_buying_type),
     spend: toNumber(row.spend),
     impressions: toNumber(row.impressions),
+    reach: toNumber(row.reach),
     clicks: toNumber(row.clicks),
+    outbound_clicks: toNumber(row.outbound_clicks),
+    unique_outbound_clicks: toNumber(row.unique_outbound_clicks),
+    frequency: Number.isFinite(Number(row.frequency)) ? Number(row.frequency) : null,
+    cpm: Number.isFinite(Number(row.cpm)) ? Number(row.cpm) : null,
+    result_count: readNullableNumber(row.result_count),
+    cost_per_result: readNullableNumber(row.cost_per_result),
     date,
   };
 }
@@ -239,6 +507,44 @@ function createAdRow(id, adsetId = "unknown_adset", campaignId = "unknown_campai
     ad_id: id,
     adset_id: adsetId,
     campaign_id: campaignId,
+    ad_name: null,
+    ad_status: null,
+    ad_effective_status: null,
+    primary_text: null,
+    headline: null,
+    description: null,
+    cta_text: null,
+    creative_id: null,
+    creative_name: null,
+    creative_asset_url: null,
+    creative_thumbnail_url: null,
+    final_url: null,
+    url_tags: null,
+    post_id: null,
+    post_permalink: null,
+    adset_name: null,
+    adset_status: null,
+    adset_effective_status: null,
+    optimization_goal: null,
+    optimization_event: null,
+    billing_event: null,
+    bid_strategy: null,
+    bid_amount: 0,
+    daily_budget: 0,
+    lifetime_budget: 0,
+    attribution_spec: [],
+    publisher_platforms: [],
+    facebook_positions: [],
+    instagram_positions: [],
+    device_platforms: [],
+    countries: [],
+    start_time: null,
+    end_time: null,
+    campaign_name: null,
+    campaign_objective: null,
+    campaign_status: null,
+    campaign_effective_status: null,
+    campaign_buying_type: null,
     hasMetaAttributionLink: false,
     signups: 0,
     tracked_signups: 0,
@@ -249,18 +555,105 @@ function createAdRow(id, adsetId = "unknown_adset", campaignId = "unknown_campai
     paid: 0,
     revenue: 0,
     paidKnownRevenue: 0,
+    powerlifters_selected: 0,
+    bodybuilders_selected: 0,
+    other_selected: 0,
+    cookie_accepted_signups: 0,
+    cookie_accepted_powerlifters_selected: 0,
     spend: 0,
     impressions: 0,
+    reach: 0,
     clicks: 0,
+    outbound_clicks: 0,
+    unique_outbound_clicks: 0,
+    frequency: null,
+    cpm: null,
+    result_count: null,
+    cost_per_result: null,
+  };
+}
+
+function createAdsetRow(id, campaignId = "unknown_campaign") {
+  return {
+    id,
+    adset_id: id,
+    campaign_id: campaignId,
+    ad_count: 0,
+    _adIds: new Set(),
+    ad_name: null,
+    ad_status: null,
+    ad_effective_status: null,
+    primary_text: null,
+    headline: null,
+    description: null,
+    cta_text: null,
+    creative_id: null,
+    creative_name: null,
+    creative_asset_url: null,
+    creative_thumbnail_url: null,
+    final_url: null,
+    url_tags: null,
+    post_id: null,
+    post_permalink: null,
+    adset_name: null,
+    adset_status: null,
+    adset_effective_status: null,
+    optimization_goal: null,
+    optimization_event: null,
+    billing_event: null,
+    bid_strategy: null,
+    bid_amount: 0,
+    daily_budget: 0,
+    lifetime_budget: 0,
+    attribution_spec: [],
+    publisher_platforms: [],
+    facebook_positions: [],
+    instagram_positions: [],
+    device_platforms: [],
+    countries: [],
+    start_time: null,
+    end_time: null,
+    campaign_name: null,
+    campaign_objective: null,
+    campaign_status: null,
+    campaign_effective_status: null,
+    campaign_buying_type: null,
+    hasMetaAttributionLink: false,
+    signups: 0,
+    tracked_signups: 0,
+    inferred_signups: 0,
+    invited: 0,
+    blocked: 0,
+    athleteShown: 0,
+    paid: 0,
+    revenue: 0,
+    paidKnownRevenue: 0,
+    powerlifters_selected: 0,
+    bodybuilders_selected: 0,
+    other_selected: 0,
+    cookie_accepted_signups: 0,
+    cookie_accepted_powerlifters_selected: 0,
+    spend: 0,
+    impressions: 0,
+    reach: 0,
+    clicks: 0,
+    outbound_clicks: 0,
+    unique_outbound_clicks: 0,
+    frequency: null,
+    cpm: null,
+    result_count: null,
+    cost_per_result: null,
   };
 }
 
 function aggregateMetaRows(rows, filters) {
   const byAd = new Map();
+  const byAdset = new Map();
   const byDate = new Map();
 
   let spend = 0;
   let impressions = 0;
+  let reach = 0;
   let clicks = 0;
 
   for (const row of rows) {
@@ -270,19 +663,63 @@ function aggregateMetaRows(rows, filters) {
 
     spend += row.spend;
     impressions += row.impressions;
+    reach += row.reach || 0;
     clicks += row.clicks;
 
     const adRow = getOrCreate(byAd, row.ad_id, () => ({
       ad_id: row.ad_id,
       adset_id: row.adset_id,
       campaign_id: row.campaign_id,
+      ...createAdRow(row.ad_id, row.adset_id, row.campaign_id),
       spend: 0,
       impressions: 0,
       clicks: 0,
     }));
+    hydrateMetaConfiguration(adRow, row);
     adRow.spend += row.spend;
     adRow.impressions += row.impressions;
+    adRow.reach += row.reach || 0;
     adRow.clicks += row.clicks;
+    adRow.outbound_clicks += row.outbound_clicks || 0;
+    adRow.unique_outbound_clicks += row.unique_outbound_clicks || 0;
+    if (row.result_count !== null && row.result_count !== undefined) {
+      adRow.result_count = (adRow.result_count ?? 0) + row.result_count;
+    }
+    if (adRow.impressions > 0) {
+      adRow.cpm = (adRow.spend * 1000) / adRow.impressions;
+    }
+    if (adRow.reach > 0) {
+      adRow.frequency = adRow.impressions / adRow.reach;
+    }
+    if (adRow.result_count !== null && adRow.result_count > 0) {
+      adRow.cost_per_result = adRow.spend / adRow.result_count;
+    }
+
+    const adsetRow = getOrCreate(byAdset, row.adset_id, () => ({
+      ...createAdsetRow(row.adset_id, row.campaign_id),
+    }));
+    hydrateMetaConfiguration(adsetRow, row);
+    adsetRow._adIds.add(row.ad_id);
+    adsetRow.ad_count = adsetRow._adIds.size;
+    adsetRow.spend += row.spend;
+    adsetRow.impressions += row.impressions;
+    adsetRow.reach += row.reach || 0;
+    adsetRow.clicks += row.clicks;
+    adsetRow.outbound_clicks += row.outbound_clicks || 0;
+    adsetRow.unique_outbound_clicks += row.unique_outbound_clicks || 0;
+    if (row.result_count !== null && row.result_count !== undefined) {
+      adsetRow.result_count = (adsetRow.result_count ?? 0) + row.result_count;
+    }
+    if (adsetRow.impressions > 0) {
+      adsetRow.cpm = (adsetRow.spend * 1000) / adsetRow.impressions;
+    }
+    if (adsetRow.reach > 0) {
+      adsetRow.frequency = adsetRow.impressions / adsetRow.reach;
+    }
+    if (adsetRow.result_count !== null && adsetRow.result_count > 0) {
+      adsetRow.cost_per_result = adsetRow.spend / adsetRow.result_count;
+    }
+    adsetRow.hasMetaAttributionLink = true;
 
     if (row.date) {
       const dayRow = getOrCreate(byDate, row.date, () => ({
@@ -297,8 +734,9 @@ function aggregateMetaRows(rows, filters) {
   }
 
   return {
-    totals: {spend, impressions, clicks},
+    totals: {spend, impressions, reach, clicks},
     byAd,
+    byAdset,
     byDate,
   };
 }
@@ -310,7 +748,9 @@ function computeAdMetrics(row) {
   const ctr = row.hasMetaAttributionLink && row.impressions > 0 ? row.clicks / row.impressions : null;
   const cpc = row.hasMetaAttributionLink && row.clicks > 0 ? row.spend / row.clicks : null;
   const cpm =
-    row.hasMetaAttributionLink && row.impressions > 0 ? (row.spend * 1000) / row.impressions : null;
+    row.hasMetaAttributionLink
+      ? row.cpm ?? (row.impressions > 0 ? (row.spend * 1000) / row.impressions : null)
+      : null;
   const clickToSignupRate =
     row.hasMetaAttributionLink && row.clicks > 0 ? row.signups / row.clicks : null;
   const paidRate = row.signups > 0 ? row.paid / row.signups : null;
@@ -321,6 +761,19 @@ function computeAdMetrics(row) {
     row.hasMetaAttributionLink && row.signups > 0 ? row.spend / row.signups : null;
   const cac = row.hasMetaAttributionLink && row.paid > 0 ? row.spend / row.paid : null;
   const roas = row.hasMetaAttributionLink && row.spend > 0 ? row.revenue / row.spend : null;
+  const powerliftersRate = row.signups > 0 ? row.powerlifters_selected / row.signups : null;
+  const bodybuildersRate = row.signups > 0 ? row.bodybuilders_selected / row.signups : null;
+  const otherRate = row.signups > 0 ? row.other_selected / row.signups : null;
+  const result_count = resolveInternalResultCount({
+    optimizationEvent: row.optimization_event,
+    cookieAcceptedSignups: row.cookie_accepted_signups,
+    cookieAcceptedPowerliftersSelected: row.cookie_accepted_powerlifters_selected,
+  });
+  const cost_per_result = resolveInternalCostPerResult({
+    hasMetaAttributionLink: row.hasMetaAttributionLink,
+    spend: row.spend,
+    resultCount: result_count,
+  });
 
   return {
     ...row,
@@ -334,6 +787,59 @@ function computeAdMetrics(row) {
     inviteRate,
     blockRate,
     athleteRate,
+    powerliftersRate,
+    bodybuildersRate,
+    otherRate,
+    result_count,
+    cost_per_result,
+    costPerSignup,
+    cac,
+    roas,
+  };
+}
+
+function computeAdsetMetrics(row) {
+  const ctr = row.hasMetaAttributionLink && row.impressions > 0 ? row.clicks / row.impressions : null;
+  const cpc = row.hasMetaAttributionLink && row.clicks > 0 ? row.spend / row.clicks : null;
+  const cpm =
+    row.hasMetaAttributionLink
+      ? row.cpm ?? (row.impressions > 0 ? (row.spend * 1000) / row.impressions : null)
+      : null;
+  const clickToSignupRate =
+    row.hasMetaAttributionLink && row.clicks > 0 ? row.signups / row.clicks : null;
+  const signupToPaidRate = row.signups > 0 ? row.paid / row.signups : null;
+  const costPerSignup =
+    row.hasMetaAttributionLink && row.signups > 0 ? row.spend / row.signups : null;
+  const cac = row.hasMetaAttributionLink && row.paid > 0 ? row.spend / row.paid : null;
+  const roas = row.hasMetaAttributionLink && row.spend > 0 ? row.revenue / row.spend : null;
+  const powerliftersRate = row.signups > 0 ? row.powerlifters_selected / row.signups : null;
+  const bodybuildersRate = row.signups > 0 ? row.bodybuilders_selected / row.signups : null;
+  const otherRate = row.signups > 0 ? row.other_selected / row.signups : null;
+  const result_count = resolveInternalResultCount({
+    optimizationEvent: row.optimization_event,
+    cookieAcceptedSignups: row.cookie_accepted_signups,
+    cookieAcceptedPowerliftersSelected: row.cookie_accepted_powerlifters_selected,
+  });
+  const cost_per_result = resolveInternalCostPerResult({
+    hasMetaAttributionLink: row.hasMetaAttributionLink,
+    spend: row.spend,
+    resultCount: result_count,
+  });
+
+  return {
+    ...row,
+    ad_count:
+      row._adIds instanceof Set ? row._adIds.size : Number.isFinite(Number(row.ad_count)) ? row.ad_count : 0,
+    ctr,
+    cpc,
+    cpm,
+    clickToSignupRate,
+    signupToPaidRate,
+    powerliftersRate,
+    bodybuildersRate,
+    otherRate,
+    result_count,
+    cost_per_result,
     costPerSignup,
     cac,
     roas,
@@ -357,6 +863,7 @@ export default function App() {
   const [metaRows, setMetaRows] = useState([]);
   const [metaCurrency, setMetaCurrency] = useState("EUR");
   const [metaTimezone, setMetaTimezone] = useState("Europe/Berlin");
+  const [assetExporting, setAssetExporting] = useState(false);
 
   const [startDate, setStartDate] = useState(defaultStart);
   const [endDate, setEndDate] = useState(defaultEnd);
@@ -373,7 +880,7 @@ export default function App() {
         setIsAdmin(false);
         return;
       }
-      setIsAdmin(currentUser.uid === ANALYTICS_ADMIN_UID);
+      setIsAdmin(hasDashboardAccess(currentUser));
     });
     return () => unsubscribe();
   }, []);
@@ -383,8 +890,8 @@ export default function App() {
       throw new Error("Firebase Functions is not initialized.");
     }
 
-    const cacheKey = `meta:${since}:${until}`;
-    if (!forceRefresh) {
+    const cacheKey = `meta:v2:${since}:${until}`;
+    if (META_CACHE_ENABLED && !forceRefresh) {
       const cached = safeReadCache(cacheKey);
       if (cached) {
         return {
@@ -434,9 +941,54 @@ export default function App() {
             ad_id: ids.ad_id || key,
             adset_id: ids.adset_id,
             campaign_id: ids.campaign_id,
+            ad_name: ids.ad_name,
+            ad_status: ids.ad_status,
+            ad_effective_status: ids.ad_effective_status,
+            primary_text: ids.primary_text,
+            headline: ids.headline,
+            description: ids.description,
+            cta_text: ids.cta_text,
+            creative_id: ids.creative_id,
+            creative_name: ids.creative_name,
+            creative_asset_url: ids.creative_asset_url,
+            creative_thumbnail_url: ids.creative_thumbnail_url,
+            final_url: ids.final_url,
+            url_tags: ids.url_tags,
+            post_id: ids.post_id,
+            post_permalink: ids.post_permalink,
+            adset_name: ids.adset_name,
+            adset_status: ids.adset_status,
+            adset_effective_status: ids.adset_effective_status,
+            optimization_goal: ids.optimization_goal,
+            optimization_event: ids.optimization_event,
+            billing_event: ids.billing_event,
+            bid_strategy: ids.bid_strategy,
+            bid_amount: ids.bid_amount,
+            daily_budget: ids.daily_budget,
+            lifetime_budget: ids.lifetime_budget,
+            attribution_spec: ids.attribution_spec,
+            publisher_platforms: ids.publisher_platforms,
+            facebook_positions: ids.facebook_positions,
+            instagram_positions: ids.instagram_positions,
+            device_platforms: ids.device_platforms,
+            countries: ids.countries,
+            start_time: ids.start_time,
+            end_time: ids.end_time,
+            campaign_name: ids.campaign_name,
+            campaign_objective: ids.campaign_objective,
+            campaign_status: ids.campaign_status,
+            campaign_effective_status: ids.campaign_effective_status,
+            campaign_buying_type: ids.campaign_buying_type,
             spend: metrics.spend,
             impressions: metrics.impressions,
+            reach: metrics.reach,
             clicks: metrics.clicks,
+            outbound_clicks: metrics.outbound_clicks,
+            unique_outbound_clicks: metrics.unique_outbound_clicks,
+            frequency: metrics.frequency,
+            cpm: metrics.cpm,
+            result_count: metrics.result_count,
+            cost_per_result: metrics.cost_per_result,
             date_start: date,
             date_stop: date,
           });
@@ -454,9 +1006,54 @@ export default function App() {
             ad_id: normalized.ad_id || key,
             adset_id: normalized.adset_id,
             campaign_id: normalized.campaign_id,
+            ad_name: normalized.ad_name,
+            ad_status: normalized.ad_status,
+            ad_effective_status: normalized.ad_effective_status,
+            primary_text: normalized.primary_text,
+            headline: normalized.headline,
+            description: normalized.description,
+            cta_text: normalized.cta_text,
+            creative_id: normalized.creative_id,
+            creative_name: normalized.creative_name,
+            creative_asset_url: normalized.creative_asset_url,
+            creative_thumbnail_url: normalized.creative_thumbnail_url,
+            final_url: normalized.final_url,
+            url_tags: normalized.url_tags,
+            post_id: normalized.post_id,
+            post_permalink: normalized.post_permalink,
+            adset_name: normalized.adset_name,
+            adset_status: normalized.adset_status,
+            adset_effective_status: normalized.adset_effective_status,
+            optimization_goal: normalized.optimization_goal,
+            optimization_event: normalized.optimization_event,
+            billing_event: normalized.billing_event,
+            bid_strategy: normalized.bid_strategy,
+            bid_amount: normalized.bid_amount,
+            daily_budget: normalized.daily_budget,
+            lifetime_budget: normalized.lifetime_budget,
+            attribution_spec: normalized.attribution_spec,
+            publisher_platforms: normalized.publisher_platforms,
+            facebook_positions: normalized.facebook_positions,
+            instagram_positions: normalized.instagram_positions,
+            device_platforms: normalized.device_platforms,
+            countries: normalized.countries,
+            start_time: normalized.start_time,
+            end_time: normalized.end_time,
+            campaign_name: normalized.campaign_name,
+            campaign_objective: normalized.campaign_objective,
+            campaign_status: normalized.campaign_status,
+            campaign_effective_status: normalized.campaign_effective_status,
+            campaign_buying_type: normalized.campaign_buying_type,
             spend: normalized.spend,
             impressions: normalized.impressions,
+            reach: normalized.reach,
             clicks: normalized.clicks,
+            outbound_clicks: normalized.outbound_clicks,
+            unique_outbound_clicks: normalized.unique_outbound_clicks,
+            frequency: normalized.frequency,
+            cpm: normalized.cpm,
+            result_count: normalized.result_count,
+            cost_per_result: normalized.cost_per_result,
           });
         })
         .filter(Boolean);
@@ -468,12 +1065,14 @@ export default function App() {
       timezone: payload.timezone || "Europe/Berlin",
     };
 
-    safeWriteCache(cacheKey, {
-      cachedAt: Date.now(),
-      rows,
-      currency: normalized.currency,
-      timezone: normalized.timezone,
-    });
+    if (META_CACHE_ENABLED) {
+      safeWriteCache(cacheKey, {
+        cachedAt: Date.now(),
+        rows,
+        currency: normalized.currency,
+        timezone: normalized.timezone,
+      });
+    }
 
     return normalized;
   };
@@ -594,6 +1193,7 @@ export default function App() {
 
   const derived = useMemo(() => {
     const adMap = new Map();
+    const adsetMap = new Map();
     const coachesByDate = new Map();
     const athleteTypeDailyDistribution = computeAthleteTypeDailyDistribution(
       filteredRecords,
@@ -632,13 +1232,21 @@ export default function App() {
       row.adset_id = row.adset_id || adsetId;
       row.campaign_id = row.campaign_id || campaignId;
 
+      const adsetRow = getOrCreate(adsetMap, adsetId, () => createAdsetRow(adsetId, campaignId));
+      adsetRow.campaign_id = adsetRow.campaign_id || campaignId;
+      adsetRow._adIds.add(adId);
+      adsetRow.ad_count = adsetRow._adIds.size;
+
       row.signups += 1;
+      adsetRow.signups += 1;
       funnelTotals.signups += 1;
       if (attributionType === "tracked_paid") {
         row.tracked_signups += 1;
+        adsetRow.tracked_signups += 1;
         attributionTotals.trackedSignups += 1;
       } else if (attributionType === "inferred_paid") {
         row.inferred_signups += 1;
+        adsetRow.inferred_signups += 1;
         attributionTotals.inferredSignups += 1;
       } else {
         attributionTotals.nonPaidSignups += 1;
@@ -648,21 +1256,27 @@ export default function App() {
       const blockCompleted = isStepCompleted(record, "onboarding_show_block") === true;
       const athleteShown = isStepCompleted(record, "onboarding_show_athlete_app") === true;
       const paid = record.has_paid === true;
+      const cookiesAccepted = record.cookies_accepted === true;
+      const athleteTypes = normalizeAthleteTypes(record.onboarding_athletes_types);
 
       if (inviteCompleted) {
         row.invited += 1;
+        adsetRow.invited += 1;
         funnelTotals.invited += 1;
       }
       if (blockCompleted) {
         row.blocked += 1;
+        adsetRow.blocked += 1;
         funnelTotals.blocked += 1;
       }
       if (athleteShown) {
         row.athleteShown += 1;
+        adsetRow.athleteShown += 1;
         funnelTotals.athleteShown += 1;
       }
       if (paid) {
         row.paid += 1;
+        adsetRow.paid += 1;
         funnelTotals.paid += 1;
         if (attributionType === "tracked_paid") {
           attributionTotals.trackedPaid += 1;
@@ -682,8 +1296,31 @@ export default function App() {
       if (paid && priceValue !== null) {
         row.revenue += priceValue;
         row.paidKnownRevenue += 1;
+        adsetRow.revenue += priceValue;
+        adsetRow.paidKnownRevenue += 1;
         funnelTotals.revenue += priceValue;
         funnelTotals.paidKnownRevenue += 1;
+      }
+
+      if (athleteTypes.includes("powerlifters")) {
+        row.powerlifters_selected += 1;
+        adsetRow.powerlifters_selected += 1;
+      }
+      if (athleteTypes.includes("bodybuilders")) {
+        row.bodybuilders_selected += 1;
+        adsetRow.bodybuilders_selected += 1;
+      }
+      if (athleteTypes.includes("other")) {
+        row.other_selected += 1;
+        adsetRow.other_selected += 1;
+      }
+      if (cookiesAccepted) {
+        row.cookie_accepted_signups += 1;
+        adsetRow.cookie_accepted_signups += 1;
+        if (athleteTypes.includes("powerlifters")) {
+          row.cookie_accepted_powerlifters_selected += 1;
+          adsetRow.cookie_accepted_powerlifters_selected += 1;
+        }
       }
 
       const dateKey = toDateKey(record.trial_period_start_date);
@@ -721,13 +1358,58 @@ export default function App() {
       if (!row.campaign_id || row.campaign_id.startsWith("unknown")) {
         row.campaign_id = meta.campaign_id || row.campaign_id;
       }
+      hydrateMetaConfiguration(row, meta);
       row.spend = meta.spend;
       row.impressions = meta.impressions;
+      row.reach = meta.reach || 0;
       row.clicks = meta.clicks;
+      row.outbound_clicks = meta.outbound_clicks || 0;
+      row.unique_outbound_clicks = meta.unique_outbound_clicks || 0;
+      row.frequency = meta.frequency ?? row.frequency;
+      row.cpm = meta.cpm ?? row.cpm;
+      row.hasMetaAttributionLink = true;
+    }
+
+    for (const [adsetId, meta] of metaAggregate.byAdset.entries()) {
+      const row = getOrCreate(
+        adsetMap,
+        adsetId,
+        () => createAdsetRow(adsetId, meta.campaign_id || "unknown_campaign"),
+      );
+      if (!row.campaign_id || row.campaign_id.startsWith("unknown")) {
+        row.campaign_id = meta.campaign_id || row.campaign_id;
+      }
+      hydrateMetaConfiguration(row, meta);
+      row.ad_count =
+        row._adIds instanceof Set && row._adIds.size > 0
+          ? row._adIds.size
+          : meta._adIds instanceof Set && meta._adIds.size > 0
+            ? meta._adIds.size
+            : meta.ad_count || row.ad_count;
+      row.spend = meta.spend;
+      row.impressions = meta.impressions;
+      row.reach = meta.reach || 0;
+      row.clicks = meta.clicks;
+      row.outbound_clicks = meta.outbound_clicks || 0;
+      row.unique_outbound_clicks = meta.unique_outbound_clicks || 0;
+      row.frequency = meta.frequency ?? row.frequency;
+      row.cpm = meta.cpm ?? row.cpm;
       row.hasMetaAttributionLink = true;
     }
 
     const adRows = Array.from(adMap.values()).map((row) => computeAdMetrics(row));
+    const adRowsByAdset = new Map();
+    for (const adRow of adRows) {
+      const rowsForAdset = adRowsByAdset.get(adRow.adset_id) || [];
+      rowsForAdset.push(adRow);
+      adRowsByAdset.set(adRow.adset_id, rowsForAdset);
+    }
+    const adsetRows = Array.from(adsetMap.values()).map((row) => (
+      rollupAdsetResultMetrics(
+        computeAdsetMetrics(row),
+        adRowsByAdset.get(row.adset_id) || [],
+      )
+    ));
 
     const topBySpend = adRows
       .filter((row) => row.spend > 0)
@@ -761,6 +1443,7 @@ export default function App() {
 
     return {
       adRows,
+      adsetRows,
       topBySpend,
       topBySignups,
       metaSeries,
@@ -781,9 +1464,216 @@ export default function App() {
         return (b.spend || 0) - (a.spend || 0);
       });
   }, [derived.adRows]);
+  const adsetTableRows = useMemo(() => {
+    return derived.adsetRows
+      .filter((row) => row.adset_id !== INFERRED_PAID_UNKNOWN && row.adset_id !== UNKNOWN_ADSET)
+      .slice()
+      .sort((a, b) => {
+        if (b.signups !== a.signups) return b.signups - a.signups;
+        return (b.spend || 0) - (a.spend || 0);
+      });
+  }, [derived.adsetRows]);
   const topBySignupsWithMeta = useMemo(() => {
     return derived.topBySignups.filter((row) => row.hasMetaAttributionLink);
   }, [derived.topBySignups]);
+  const dateRangeLabel = `${startDate} to ${endDate}`;
+
+  const renderCreativeCell = (row) => formatMetaLinkedMetric(row, () => (
+    row.creative_thumbnail_url || row.creative_name || row.creative_id
+      ? (
+        <div className="creative-cell">
+          {row.creative_thumbnail_url && (
+            <img
+              className="creative-thumb"
+              src={row.creative_thumbnail_url}
+              alt={row.creative_name || row.creative_id || "Creative thumbnail"}
+              loading="lazy"
+            />
+          )}
+          <span>{row.creative_name || row.creative_id || "-"}</span>
+        </div>
+      )
+      : "-"
+  ));
+
+  const adTableColumns = [
+    {
+      label: "Ad ID",
+      cell: (row) => (
+        row.ad_id === INFERRED_PAID_UNKNOWN
+          ? `${INFERRED_PAID_UNKNOWN} (country-inferred)`
+          : row.ad_id
+      ),
+      csvValue: (row) => (
+        row.ad_id === INFERRED_PAID_UNKNOWN
+          ? `${INFERRED_PAID_UNKNOWN} (country-inferred)`
+          : row.ad_id
+      ),
+    },
+    {label: "Ad Name", cell: (row) => formatMetaLinkedMetric(row, () => row.ad_name || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.ad_name || "-")},
+    {label: "Ad Effective Status", cell: (row) => formatMetaLinkedMetric(row, () => row.ad_effective_status || row.ad_status || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.ad_effective_status || row.ad_status || "-")},
+    {label: "Primary Text", cell: (row) => formatMetaLinkedMetric(row, () => row.primary_text || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.primary_text || "-")},
+    {label: "Headline", cell: (row) => formatMetaLinkedMetric(row, () => row.headline || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.headline || "-")},
+    {label: "Description", cell: (row) => formatMetaLinkedMetric(row, () => row.description || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.description || "-")},
+    {label: "CTA Text", cell: (row) => formatMetaLinkedMetric(row, () => formatCallToActionText(row.cta_text) || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCallToActionText(row.cta_text) || "-")},
+    {label: "Creative", cell: (row) => renderCreativeCell(row), csvValue: (row) => formatMetaLinkedMetric(row, () => row.creative_name || row.creative_id || "-")},
+    {label: "Creative ID", cell: (row) => formatMetaLinkedMetric(row, () => row.creative_id || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.creative_id || "-")},
+    {label: "Creative Thumbnail URL", cell: (row) => formatMetaLinkedMetric(row, () => row.creative_thumbnail_url || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.creative_thumbnail_url || "-")},
+    {label: "UTM", cell: (row) => formatMetaLinkedMetric(row, () => row.url_tags || extractUtmString(row.final_url) || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.url_tags || extractUtmString(row.final_url) || "-")},
+    {label: "Post ID", cell: (row) => formatMetaLinkedMetric(row, () => row.post_id || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.post_id || "-")},
+    {label: "Preview Link", cell: (row) => formatMetaLinkedMetric(row, () => row.post_permalink || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.post_permalink || "-")},
+    {label: "Campaign ID", cell: (row) => formatMetaLinkedMetric(row, () => row.campaign_id || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.campaign_id || "-")},
+    {label: "Campaign Name", cell: (row) => formatMetaLinkedMetric(row, () => row.campaign_name || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.campaign_name || "-")},
+    {label: "Campaign Objective", cell: (row) => formatMetaLinkedMetric(row, () => row.campaign_objective || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.campaign_objective || "-")},
+    {label: "Campaign Effective Status", cell: (row) => formatMetaLinkedMetric(row, () => row.campaign_effective_status || row.campaign_status || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.campaign_effective_status || row.campaign_status || "-")},
+    {label: "Campaign Buying Type", cell: (row) => formatMetaLinkedMetric(row, () => row.campaign_buying_type || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.campaign_buying_type || "-")},
+    {label: "Ad Set ID", cell: (row) => formatMetaLinkedMetric(row, () => row.adset_id || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.adset_id || "-")},
+    {label: "Ad Set Name", cell: (row) => formatMetaLinkedMetric(row, () => row.adset_name || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.adset_name || "-")},
+    {label: "Ad Set Effective Status", cell: (row) => formatMetaLinkedMetric(row, () => row.adset_effective_status || row.adset_status || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.adset_effective_status || row.adset_status || "-")},
+    {label: "Optimization Goal", cell: (row) => formatMetaLinkedMetric(row, () => row.optimization_goal || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.optimization_goal || "-")},
+    {label: "Optimization Event", cell: (row) => formatMetaLinkedMetric(row, () => row.optimization_event || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.optimization_event || "-")},
+    {label: "Billing Event", cell: (row) => formatMetaLinkedMetric(row, () => row.billing_event || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.billing_event || "-")},
+    {label: "Bid Strategy", cell: (row) => formatMetaLinkedMetric(row, () => row.bid_strategy || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.bid_strategy || "-")},
+    {label: "Daily Budget", cell: (row) => formatMetaLinkedMetric(row, () => formatMinorUnitCurrency(row.daily_budget, metaCurrency, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatMinorUnitCurrency(row.daily_budget, metaCurrency, 2))},
+    {label: "Attribution Spec", cell: (row) => formatMetaLinkedMetric(row, () => formatAttributionSpecValue(row.attribution_spec)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatAttributionSpecValue(row.attribution_spec))},
+    {label: "Publisher Platforms", cell: (row) => formatMetaLinkedMetric(row, () => formatListValue(row.publisher_platforms)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatListCsv(row.publisher_platforms))},
+    {label: "Facebook Positions", cell: (row) => formatMetaLinkedMetric(row, () => formatListValue(row.facebook_positions)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatListCsv(row.facebook_positions))},
+    {label: "Instagram Positions", cell: (row) => formatMetaLinkedMetric(row, () => formatListValue(row.instagram_positions)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatListCsv(row.instagram_positions))},
+    {label: "Device Platforms", cell: (row) => formatMetaLinkedMetric(row, () => formatListValue(row.device_platforms)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatListCsv(row.device_platforms))},
+    {label: "Countries", cell: (row) => formatMetaLinkedMetric(row, () => formatListValue(row.countries)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatListCsv(row.countries))},
+    {label: "Active From", cell: (row) => formatMetaLinkedMetric(row, () => formatMetaDateTime(row.start_time, metaTimezone)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatMetaDateTime(row.start_time, metaTimezone))},
+    {label: "Active Until", cell: (row) => formatMetaLinkedMetric(row, () => formatMetaEndTime(row.end_time, metaTimezone)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatMetaEndTime(row.end_time, metaTimezone))},
+    {label: "Spend", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.spend, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.spend, 2, metaCurrency))},
+    {label: "Impressions", cell: (row) => formatMetaLinkedMetric(row, () => Math.round(row.impressions).toLocaleString()), csvValue: (row) => formatMetaLinkedMetric(row, () => Math.round(row.impressions).toLocaleString())},
+    {label: "Unique Outbound Clicks", cell: (row) => formatMetaLinkedMetric(row, () => Math.round(row.unique_outbound_clicks || 0).toLocaleString()), csvValue: (row) => formatMetaLinkedMetric(row, () => Math.round(row.unique_outbound_clicks || 0).toLocaleString())},
+    {label: "Outbound Clicks", cell: (row) => formatMetaLinkedMetric(row, () => Math.round(row.outbound_clicks || 0).toLocaleString()), csvValue: (row) => formatMetaLinkedMetric(row, () => Math.round(row.outbound_clicks || 0).toLocaleString())},
+    {label: "Clicks", cell: (row) => formatMetaLinkedMetric(row, () => Math.round(row.clicks).toLocaleString()), csvValue: (row) => formatMetaLinkedMetric(row, () => Math.round(row.clicks).toLocaleString())},
+    {label: "Impr / €", cell: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.impressionsPerEuro, 1)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.impressionsPerEuro, 1))},
+    {label: "Clicks / €", cell: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.clicksPerEuro, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.clicksPerEuro, 2))},
+    {label: "CTR", cell: (row) => formatMetaLinkedMetric(row, () => formatPercent(row.ctr, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatPercent(row.ctr, 2))},
+    {label: "CPC", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cpc, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cpc, 2, metaCurrency))},
+    {label: "Frequency", cell: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.frequency, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.frequency, 2))},
+    {label: "CPM", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cpm, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cpm, 2, metaCurrency))},
+    {label: "Signups (coaches_public)", cell: (row) => row.signups, csvValue: (row) => row.signups},
+    {label: "Results", cell: (row) => formatMetaLinkedMetric(row, () => formatMetaResultCountValue(row.result_count)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatMetaResultCountValue(row.result_count))},
+    {label: "Cost / Result", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cost_per_result, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cost_per_result, 2, metaCurrency))},
+    {label: "% Powerlifter", cell: (row) => formatPercent(row.powerliftersRate, 2), csvValue: (row) => formatPercent(row.powerliftersRate, 2)},
+    {label: "% Bodybuilder", cell: (row) => formatPercent(row.bodybuildersRate, 2), csvValue: (row) => formatPercent(row.bodybuildersRate, 2)},
+    {label: "% Other", cell: (row) => formatPercent(row.otherRate, 2), csvValue: (row) => formatPercent(row.otherRate, 2)},
+    {label: "Invited", cell: (row) => row.invited, csvValue: (row) => row.invited},
+    {label: "Viewed Block", cell: (row) => row.blocked, csvValue: (row) => row.blocked},
+    {label: "Athlete App", cell: (row) => row.athleteShown, csvValue: (row) => row.athleteShown},
+    {label: "Paid", cell: (row) => row.paid, csvValue: (row) => row.paid},
+    {label: "Signup Rate from Click", cell: (row) => formatMetaLinkedMetric(row, () => formatPercent(row.clickToSignupRate, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatPercent(row.clickToSignupRate, 2))},
+    {label: "Signup to Paid", cell: (row) => formatPercent(row.paidRate, 2), csvValue: (row) => formatPercent(row.paidRate, 2)},
+    {label: "Cost / Signup", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.costPerSignup, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.costPerSignup, 2, metaCurrency))},
+    {label: "CAC", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cac, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cac, 2, metaCurrency))},
+    {label: "ROAS", cell: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.roas, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.roas, 2))},
+  ];
+
+  const adsetTableColumns = [
+    {label: "Campaign ID", cell: (row) => formatMetaLinkedMetric(row, () => row.campaign_id || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.campaign_id || "-")},
+    {label: "Campaign Name", cell: (row) => formatMetaLinkedMetric(row, () => row.campaign_name || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.campaign_name || "-")},
+    {label: "Campaign Objective", cell: (row) => formatMetaLinkedMetric(row, () => row.campaign_objective || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.campaign_objective || "-")},
+    {label: "Campaign Effective Status", cell: (row) => formatMetaLinkedMetric(row, () => row.campaign_effective_status || row.campaign_status || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.campaign_effective_status || row.campaign_status || "-")},
+    {label: "Campaign Buying Type", cell: (row) => formatMetaLinkedMetric(row, () => row.campaign_buying_type || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.campaign_buying_type || "-")},
+    {label: "Ad Set ID", cell: (row) => row.adset_id, csvValue: (row) => row.adset_id},
+    {label: "Ad Set Name", cell: (row) => formatMetaLinkedMetric(row, () => row.adset_name || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.adset_name || "-")},
+    {label: "Ad Set Effective Status", cell: (row) => formatMetaLinkedMetric(row, () => row.adset_effective_status || row.adset_status || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.adset_effective_status || row.adset_status || "-")},
+    {label: "Optimization Goal", cell: (row) => formatMetaLinkedMetric(row, () => row.optimization_goal || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.optimization_goal || "-")},
+    {label: "Optimization Event", cell: (row) => formatMetaLinkedMetric(row, () => row.optimization_event || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.optimization_event || "-")},
+    {label: "Billing Event", cell: (row) => formatMetaLinkedMetric(row, () => row.billing_event || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.billing_event || "-")},
+    {label: "Bid Strategy", cell: (row) => formatMetaLinkedMetric(row, () => row.bid_strategy || "-"), csvValue: (row) => formatMetaLinkedMetric(row, () => row.bid_strategy || "-")},
+    {label: "Daily Budget", cell: (row) => formatMetaLinkedMetric(row, () => formatMinorUnitCurrency(row.daily_budget, metaCurrency, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatMinorUnitCurrency(row.daily_budget, metaCurrency, 2))},
+    {label: "Attribution Spec", cell: (row) => formatMetaLinkedMetric(row, () => formatAttributionSpecValue(row.attribution_spec)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatAttributionSpecValue(row.attribution_spec))},
+    {label: "Publisher Platforms", cell: (row) => formatMetaLinkedMetric(row, () => formatListValue(row.publisher_platforms)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatListCsv(row.publisher_platforms))},
+    {label: "Facebook Positions", cell: (row) => formatMetaLinkedMetric(row, () => formatListValue(row.facebook_positions)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatListCsv(row.facebook_positions))},
+    {label: "Instagram Positions", cell: (row) => formatMetaLinkedMetric(row, () => formatListValue(row.instagram_positions)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatListCsv(row.instagram_positions))},
+    {label: "Device Platforms", cell: (row) => formatMetaLinkedMetric(row, () => formatListValue(row.device_platforms)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatListCsv(row.device_platforms))},
+    {label: "Countries", cell: (row) => formatMetaLinkedMetric(row, () => formatListValue(row.countries)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatListCsv(row.countries))},
+    {label: "Active From", cell: (row) => formatMetaLinkedMetric(row, () => formatMetaDateTime(row.start_time, metaTimezone)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatMetaDateTime(row.start_time, metaTimezone))},
+    {label: "Active Until", cell: (row) => formatMetaLinkedMetric(row, () => formatMetaEndTime(row.end_time, metaTimezone)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatMetaEndTime(row.end_time, metaTimezone))},
+    {label: "Ads", cell: (row) => row.ad_count, csvValue: (row) => row.ad_count},
+    {label: "Spend", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.spend, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.spend, 2, metaCurrency))},
+    {label: "Impressions", cell: (row) => formatMetaLinkedMetric(row, () => Math.round(row.impressions).toLocaleString()), csvValue: (row) => formatMetaLinkedMetric(row, () => Math.round(row.impressions).toLocaleString())},
+    {label: "Unique Outbound Clicks", cell: (row) => formatMetaLinkedMetric(row, () => Math.round(row.unique_outbound_clicks || 0).toLocaleString()), csvValue: (row) => formatMetaLinkedMetric(row, () => Math.round(row.unique_outbound_clicks || 0).toLocaleString())},
+    {label: "Outbound Clicks", cell: (row) => formatMetaLinkedMetric(row, () => Math.round(row.outbound_clicks || 0).toLocaleString()), csvValue: (row) => formatMetaLinkedMetric(row, () => Math.round(row.outbound_clicks || 0).toLocaleString())},
+    {label: "Clicks", cell: (row) => formatMetaLinkedMetric(row, () => Math.round(row.clicks).toLocaleString()), csvValue: (row) => formatMetaLinkedMetric(row, () => Math.round(row.clicks).toLocaleString())},
+    {label: "CTR", cell: (row) => formatMetaLinkedMetric(row, () => formatPercent(row.ctr, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatPercent(row.ctr, 2))},
+    {label: "CPC", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cpc, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cpc, 2, metaCurrency))},
+    {label: "Frequency", cell: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.frequency, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.frequency, 2))},
+    {label: "CPM", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cpm, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cpm, 2, metaCurrency))},
+    {label: "Signups (coaches_public)", cell: (row) => row.signups, csvValue: (row) => row.signups},
+    {label: "Results", cell: (row) => formatMetaLinkedMetric(row, () => formatMetaResultCountValue(row.result_count)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatMetaResultCountValue(row.result_count))},
+    {label: "Cost / Result", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cost_per_result, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cost_per_result, 2, metaCurrency))},
+    {label: "% Powerlifter", cell: (row) => formatPercent(row.powerliftersRate, 2), csvValue: (row) => formatPercent(row.powerliftersRate, 2)},
+    {label: "% Bodybuilder", cell: (row) => formatPercent(row.bodybuildersRate, 2), csvValue: (row) => formatPercent(row.bodybuildersRate, 2)},
+    {label: "% Other", cell: (row) => formatPercent(row.otherRate, 2), csvValue: (row) => formatPercent(row.otherRate, 2)},
+    {label: "Invited", cell: (row) => row.invited, csvValue: (row) => row.invited},
+    {label: "Viewed Block", cell: (row) => row.blocked, csvValue: (row) => row.blocked},
+    {label: "Athlete App", cell: (row) => row.athleteShown, csvValue: (row) => row.athleteShown},
+    {label: "Paid", cell: (row) => row.paid, csvValue: (row) => row.paid},
+    {label: "Signup Rate from Click", cell: (row) => formatMetaLinkedMetric(row, () => formatPercent(row.clickToSignupRate, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatPercent(row.clickToSignupRate, 2))},
+    {label: "Signup to Paid", cell: (row) => formatPercent(row.signupToPaidRate, 2), csvValue: (row) => formatPercent(row.signupToPaidRate, 2)},
+    {label: "Cost / Signup", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.costPerSignup, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.costPerSignup, 2, metaCurrency))},
+    {label: "CAC", cell: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cac, 2, metaCurrency)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatCurrency(row.cac, 2, metaCurrency))},
+    {label: "ROAS", cell: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.roas, 2)), csvValue: (row) => formatMetaLinkedMetric(row, () => formatNumber(row.roas, 2))},
+  ];
+
+  const exportableAdRows = tableRows.filter((row) => row.ad_id !== INFERRED_PAID_UNKNOWN);
+  const exportableAdsetRows = adsetTableRows;
+  const assetFiles = Array.from(
+    new Map(
+      exportableAdRows
+        .filter((row) => row.hasMetaAttributionLink && (row.creative_asset_url || row.creative_thumbnail_url))
+        .map((row) => {
+          const assetUrl = row.creative_asset_url || row.creative_thumbnail_url;
+          const key = row.creative_id || assetUrl;
+          return [
+            key,
+            {
+              url: assetUrl,
+              name:
+                buildAssetBaseName([
+                  row.creative_id ? `creative-${row.creative_id}` : null,
+                  row.ad_id ? `ad-${row.ad_id}` : null,
+                  row.campaign_name || row.campaign_id,
+                  row.ad_name || row.ad_id,
+                  row.creative_name || row.creative_id || "creative",
+                ]) || `creative-${row.creative_id || row.ad_id || "asset"}`,
+            },
+          ];
+        }),
+    ).values(),
+  );
+
+  const exportAdTable = () => {
+    downloadCsv(
+      `ad-table-${startDate}-to-${endDate}.csv`,
+      adTableColumns,
+      exportableAdRows,
+    );
+  };
+
+  const exportAssetFiles = async () => {
+    if (assetFiles.length === 0 || assetExporting) return;
+    setAssetExporting(true);
+    try {
+      await downloadAssetZip(`ad-assets-${startDate}-to-${endDate}.zip`, assetFiles);
+    } catch (error) {
+      window.alert(error?.message || "Failed to export asset files.");
+    } finally {
+      setAssetExporting(false);
+    }
+  };
+
+  const exportAdsetTable = () => {
+    downloadCsv(
+      `adset-table-${startDate}-to-${endDate}.csv`,
+      adsetTableColumns,
+      exportableAdsetRows,
+    );
+  };
 
   const overallImpressionsPerEuro =
     derived.metaTotals.spend > 0
@@ -978,6 +1868,7 @@ export default function App() {
         <div>
           <div className="eyebrow">Efort internal analytics</div>
           <h1>Ad Funnel Dashboard</h1>
+          <p className="muted">Date range: {dateRangeLabel}</p>
         </div>
         <div className="top-bar-actions">
           <span className="user-pill">{user.email}</span>
@@ -1640,69 +2531,83 @@ export default function App() {
 
       <section className="card table-card">
         <div className="table-header">
-          <h2>Ad-Level Funnel Table</h2>
-          <span className="muted">Timezone: {metaTimezone}</span>
+          <div>
+            <h2>Ad-Level Funnel Table</h2>
+            <div className="table-meta">
+              <span className="muted">Date range: {dateRangeLabel}</span>
+              <span className="muted">Timezone: {metaTimezone}</span>
+            </div>
+          </div>
+          <div className="table-actions">
+            <button className="secondary" onClick={exportAssetFiles} disabled={assetExporting || assetFiles.length === 0}>
+              {assetExporting ? "Exporting Assets..." : "Export Asset Files"}
+            </button>
+            <button className="secondary" onClick={exportAdTable}>
+              Export CSV
+            </button>
+          </div>
         </div>
         <div className="table-scroll">
           <table>
             <thead>
               <tr>
-                <th>Ad</th>
-                <th>Spend</th>
-                <th>Impressions</th>
-                <th>Clicks</th>
-                <th>Impr / €</th>
-                <th>Clicks / €</th>
-                <th>CTR</th>
-                <th>CPC</th>
-                <th>Signups</th>
-                <th>Tracked</th>
-                <th>Inferred</th>
-                <th>Invited</th>
-                <th>Viewed Block</th>
-                <th>Athlete App</th>
-                <th>Paid</th>
-                <th>Click to Signup</th>
-                <th>Signup to Paid</th>
-                <th>Cost / Signup</th>
-                <th>CAC</th>
-                <th>ROAS</th>
+                {adTableColumns.map((column) => (
+                  <th key={column.label}>{column.label}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
               {tableRows.length === 0 ? (
                 <tr>
-                  <td colSpan="20">No data for this range.</td>
+                  <td colSpan={adTableColumns.length}>No data for this range.</td>
                 </tr>
               ) : (
                 tableRows.map((row) => (
                   <tr key={row.id}>
-                    <td>
-                      {row.ad_id === INFERRED_PAID_UNKNOWN
-                        ? `${INFERRED_PAID_UNKNOWN} (country-inferred)`
-                        : row.ad_id}
-                    </td>
-                    <td>{formatMetaLinkedMetric(row, () => formatCurrency(row.spend, 2, metaCurrency))}</td>
-                    <td>
-                      {formatMetaLinkedMetric(row, () => Math.round(row.impressions).toLocaleString())}
-                    </td>
-                    <td>{formatMetaLinkedMetric(row, () => Math.round(row.clicks).toLocaleString())}</td>
-                    <td>{formatMetaLinkedMetric(row, () => formatNumber(row.impressionsPerEuro, 1))}</td>
-                    <td>{formatMetaLinkedMetric(row, () => formatNumber(row.clicksPerEuro, 2))}</td>
-                    <td>{formatMetaLinkedMetric(row, () => formatPercent(row.ctr, 2))}</td>
-                    <td>{formatMetaLinkedMetric(row, () => formatCurrency(row.cpc, 2, metaCurrency))}</td>
-                    <td>{row.signups}</td>
-                    <td>{row.tracked_signups}</td>
-                    <td>{row.inferred_signups}</td>
-                    <td>{row.invited}</td>
-                    <td>{row.blocked}</td>
-                    <td>{row.athleteShown}</td>
-                    <td>{row.paid}</td>
-                    <td>{formatMetaLinkedMetric(row, () => formatPercent(row.clickToSignupRate, 2))}</td>
-                    <td>{formatPercent(row.paidRate, 2)}</td>
-                    <td>{formatMetaLinkedMetric(row, () => formatCurrency(row.costPerSignup, 2, metaCurrency))}</td>
-                    <td>{formatMetaLinkedMetric(row, () => formatCurrency(row.cac, 2, metaCurrency))}</td>
-                    <td>{formatMetaLinkedMetric(row, () => formatNumber(row.roas, 2))}</td>
+                    {adTableColumns.map((column) => (
+                      <td key={column.label}>{column.cell(row)}</td>
+                    ))}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="card table-card">
+        <div className="table-header">
+          <div>
+            <h2>Ad Set Table</h2>
+            <div className="table-meta">
+              <span className="muted">Date range: {dateRangeLabel}</span>
+              <span className="muted">Timezone: {metaTimezone}</span>
+            </div>
+          </div>
+          <button className="secondary" onClick={exportAdsetTable}>
+            Export CSV
+          </button>
+        </div>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                {adsetTableColumns.map((column) => (
+                  <th key={column.label}>{column.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {adsetTableRows.length === 0 ? (
+                <tr>
+                  <td colSpan={adsetTableColumns.length}>No data for this range.</td>
+                </tr>
+              ) : (
+                adsetTableRows.map((row) => (
+                  <tr key={row.id}>
+                    {adsetTableColumns.map((column) => (
+                      <td key={column.label}>{column.cell(row)}</td>
+                    ))}
                   </tr>
                 ))
               )}

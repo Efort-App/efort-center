@@ -400,6 +400,19 @@ button.secondary:hover {
   border-bottom: 1px solid var(--border);
 }
 
+.table-meta {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.table-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .table-scroll {
   overflow-x: auto;
   width: 100%;
@@ -429,6 +442,23 @@ button.secondary:hover {
   color: var(--text);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
+}
+
+.creative-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 180px;
+}
+
+.creative-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  flex: 0 0 auto;
 }
 
 .table-scroll tbody tr:last-child td {
