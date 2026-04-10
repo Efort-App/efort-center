@@ -93,3 +93,4 @@ npm run deploy:hosting
 - Meta enrichment fields are resolved from the Ad, Ad Creative, Ad Set, and Campaign payloads.
 - `Results` and `Cost / Result` use the internal rules implemented in the dashboard, not Meta's raw values.
 - To ship the enriched analytics fields in production, update the deployed callable with [getMetaInsights.patch.js](/Users/polcortes/Documents/EfortCenter/getMetaInsights.patch.js).
+- Meta insights backend access is enforced in the deployed function code, not just the dashboard email allowlist. Keep the UID allowlist in sync with [getMetaInsights.patch.js](/Users/polcortes/Documents/EfortCenter/getMetaInsights.patch.js) and the deployed `EfortCoach/functions/analytics/analyticsFunctions.js`.

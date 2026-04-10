@@ -3,7 +3,10 @@ const axios = require("axios");
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
 
 const REGION = "europe-west1";
-const ANALYTICS_ADMIN_UID = "B2Xm8CFPyIS2taVlusbcIicWItF3";
+const ANALYTICS_ADMIN_UIDS = new Set([
+  "B2Xm8CFPyIS2taVlusbcIicWItF3",
+  "rb12Tsu0H3YuHnYgo7OH7idd1pl1",
+]);
 const DEFAULT_META_GRAPH_VERSION = "v24.0";
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_RETRIES = 3;
@@ -828,7 +831,7 @@ exports.getMetaInsights = onCall(
       if (!request.auth) {
         throw new HttpsError("unauthenticated", "Authentication required.");
       }
-      if (request.auth.uid !== ANALYTICS_ADMIN_UID) {
+      if (!ANALYTICS_ADMIN_UIDS.has(request.auth.uid)) {
         throw new HttpsError("permission-denied", "Not allowed.");
       }
 
