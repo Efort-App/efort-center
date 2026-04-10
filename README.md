@@ -2,56 +2,55 @@
 
 Internal dashboard for Efort Center.
 
-## What is in here
+## Workspaces
 
-- **Analytics dashboard** backed by Firebase Auth + Firestore
-- **Tasks workspace** backed by Supabase, exposed through Firebase callable functions
-- **Site menu** with:
-  - `/` → Analytics
-  - `/tasks` → Tasks
+- `/` Analytics dashboard backed by Firebase Auth + Firestore
+- `/tasks` Tasks workspace backed by Firebase callable functions + Supabase
+
+The analytics and tasks UIs share a left-hand workspace menu. Dashboard access is controlled in [src/accessControl.js](/Users/polcortes/Documents/EfortCenter/src/accessControl.js).
 
 ## Frontend setup
 
-1. Copy `.env.example` to `.env`
-2. Fill the Firebase web config values
-3. Install dependencies
-   ```bash
-   npm install
-   ```
-4. Run locally
-   ```bash
-   npm run dev
-   ```
+1. Copy `.env.example` to `.env` and fill the Firebase web config values.
+2. Install dependencies:
 
-### Local demo mode (optional)
+```bash
+npm install
+```
 
-If you want the `/tasks` workspace to use mock/demo data during local development only, put this in `.env.development.local`:
+3. Run locally:
+
+```bash
+npm run dev
+```
+
+### Local tasks demo mode
+
+To run `/tasks` against local mock data, add this to `.env.development.local`:
 
 ```bash
 VITE_TASKS_BACKEND=mock
 ```
 
-Do **not** use `.env.local` for this, because Vite also loads it during production builds.
+Do not use `.env.local` for this, because Vite also loads it for production builds.
 
-## Supabase setup
+## Access
 
-1. Create/select the Supabase project for **Efort Center**
-2. Open the SQL editor
-3. Run:
-   - `supabase/efort_center_setup.sql`
+Only these Google accounts currently have dashboard access:
 
-This creates:
-- `task_owners`
-- `tasks`
-- `task_events`
+- `efortapp@gmail.com`
+- `testec202405@gmail.com`
 
-It also seeds:
-- `Ben`
-- `Barney`
+To change that list, update [src/accessControl.js](/Users/polcortes/Documents/EfortCenter/src/accessControl.js).
 
-## Firebase Functions setup
+## Tasks backend setup
 
-Install function deps:
+1. Create or select the Supabase project for Efort Center.
+2. Run [supabase/efort_center_setup.sql](/Users/polcortes/Documents/EfortCenter/supabase/efort_center_setup.sql).
+
+That creates the task tables and seeds the default task owners.
+
+Install Cloud Functions dependencies:
 
 ```bash
 cd functions
@@ -59,7 +58,7 @@ npm install
 cd ..
 ```
 
-Set Firebase function secrets:
+Set Firebase Functions secrets:
 
 ```bash
 firebase functions:secrets:set SUPABASE_URL
@@ -67,15 +66,14 @@ firebase functions:secrets:set SUPABASE_SERVICE_ROLE_KEY
 firebase functions:secrets:set TASKS_ADMIN_EMAILS
 ```
 
-Recommended value for `TASKS_ADMIN_EMAILS`:
-- comma-separated admin emails allowed to create/update tasks
+`TASKS_ADMIN_EMAILS` should be a comma-separated allowlist for task management.
 
 ## Deploy
 
-Deploy the task functions:
+Deploy Functions:
 
 ```bash
-firebase deploy --only functions:listTaskOwners,functions:listTaskTemplates,functions:listTaskSchedules,functions:listTasks,functions:createTask,functions:updateTask,functions:saveTaskSchedule,functions:createTaskTemplate,functions:updateTaskTemplate,functions:deleteTaskTemplate,functions:createTaskFromTemplate --project efort-app
+npm run deploy:functions
 ```
 
 Deploy hosting:
@@ -84,19 +82,14 @@ Deploy hosting:
 npm run deploy:hosting
 ```
 
-`deploy:hosting` forces `VITE_TASKS_BACKEND=firebase` so production does not accidentally ship the local mock backend.
+`deploy:hosting` forces `VITE_TASKS_BACKEND=firebase` so the mock backend is not shipped to production.
 
-## Architecture
+## Analytics notes
 
-### Analytics
-- Firebase Auth
-- Firestore reads directly in the client
-- existing callable: `getMetaInsights`
-
-### Tasks
-- Firebase Auth in the client
-- Firebase callable functions as the secure backend layer
-- Supabase Postgres as the task system of record
-- Supabase service role stays server-side only
-
-This keeps the app secure without exposing privileged Supabase access in the browser.
+- Athlete type response mix reads from `coaches_public.onboarding_athletes_types`.
+- The dashboard includes ad-level and ad-set-level Meta export tables.
+- CSV exports match the visible filtered rows.
+- The ad table can also export creative assets as a ZIP.
+- Meta enrichment fields are resolved from the Ad, Ad Creative, Ad Set, and Campaign payloads.
+- `Results` and `Cost / Result` use the internal rules implemented in the dashboard, not Meta's raw values.
+- To ship the enriched analytics fields in production, update the deployed callable with [getMetaInsights.patch.js](/Users/polcortes/Documents/EfortCenter/getMetaInsights.patch.js).
