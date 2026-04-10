@@ -4,6 +4,7 @@ import {
   createMockTask,
   createMockTaskFromTemplate,
   createMockTemplate,
+  deleteMockTask,
   deleteMockTemplate,
   loadMockWorkspace,
   saveMockTaskSchedule,
@@ -66,6 +67,14 @@ export async function updateTask(taskId, patch) {
 
   const result = await firebaseCall("updateTask", {taskId, patch});
   return result.task;
+}
+
+export async function deleteTask(taskId) {
+  if (!isFirebaseBackend()) {
+    return deleteMockTask(taskId);
+  }
+
+  return firebaseCall("deleteTask", {taskId});
 }
 
 export async function saveTaskSchedule(taskId, input) {

@@ -581,6 +581,20 @@ export async function updateMockTask(taskId, patch) {
   return joinRelations(workspace).tasks.find((item) => item.id === task.id);
 }
 
+export async function deleteMockTask(taskId) {
+  const workspace = cloneWorkspace(readWorkspace());
+  const task = workspace.tasks.find((item) => item.id === taskId);
+  if (!task) {
+    throw new Error("Task not found.");
+  }
+
+  workspace.tasks = workspace.tasks.filter((item) => item.id !== taskId);
+  workspace.task_updates = (workspace.task_updates || []).filter((update) => update.task_id !== taskId);
+  workspace.schedules = workspace.schedules.filter((schedule) => schedule.source_task_id !== taskId);
+  writeWorkspace(workspace);
+  return {ok: true};
+}
+
 export async function createMockTaskFromTemplate(templateId, overrides = {}) {
   const workspace = cloneWorkspace(readWorkspace());
   const task = createTaskFromTemplateInWorkspace(workspace, templateId, overrides);

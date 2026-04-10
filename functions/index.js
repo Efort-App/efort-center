@@ -420,6 +420,29 @@ export const updateTask = onCall(sharedOptions, async (request) => {
   return {task};
 });
 
+export const deleteTask = onCall(sharedOptions, async (request) => {
+  assertAuthorized(request);
+  const taskId = cleanText(request.data?.taskId);
+
+  if (!taskId) {
+    throw new HttpsError("invalid-argument", "taskId is required.");
+  }
+
+  const supabase = getSupabaseAdmin();
+  await fetchTaskById(supabase, taskId);
+
+  await logEvent(supabase, {
+    taskId,
+    eventType: "task_deleted",
+    payload: {},
+  });
+
+  const {error} = await supabase.from("tasks").delete().eq("id", taskId);
+  if (error) throw new HttpsError("internal", error.message);
+
+  return {ok: true};
+});
+
 export const saveTaskSchedule = onCall(sharedOptions, async (request) => {
   assertAuthorized(request);
   const taskId = cleanText(request.data?.taskId);

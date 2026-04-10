@@ -22,6 +22,7 @@ import {
   computeAthleteTypeDailyDistribution,
   normalizeAthleteTypes,
 } from "./athleteTypeDistribution";
+import FeedbackPage from "./FeedbackPage";
 import TasksPage from "./TasksPage";
 import {buildAssetBaseName, downloadAssetZip} from "./assetExport";
 import {formatCallToActionText, resolveOptimizationEventLabel} from "./metaAdEnrichment";
@@ -849,6 +850,7 @@ function computeAdsetMetrics(row) {
 
 const APP_ROUTES = {
   analytics: "/",
+  feedback: "/feedback",
   tasks: "/tasks",
 };
 
@@ -859,6 +861,7 @@ const DEMO_USER = {
 
 function normalizeRoute(pathname) {
   if (pathname === APP_ROUTES.tasks) return APP_ROUTES.tasks;
+  if (pathname === APP_ROUTES.feedback) return APP_ROUTES.feedback;
   return APP_ROUTES.analytics;
 }
 
@@ -878,6 +881,26 @@ function TasksIcon() {
   );
 }
 
+function FeedbackIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true" className="site-nav-icon-svg">
+      <path d="M5 4.75A2.25 2.25 0 0 0 2.75 7v5A2.25 2.25 0 0 0 5 14.25h1.78l2.6 2.18a.75.75 0 0 0 1.23-.58v-1.6H15A2.25 2.25 0 0 0 17.25 12V7A2.25 2.25 0 0 0 15 4.75H5Zm1.5 3a.75.75 0 0 1 .75-.75h5.5a.75.75 0 0 1 0 1.5h-5.5A.75.75 0 0 1 6.5 7.75Zm0 2.75a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 0 1.5h-3.5a.75.75 0 0 1-.75-.75Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function MenuToggleIcon({open}) {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true" className="site-nav-icon-svg">
+      {open ? (
+        <path d="M5.22 5.22a.75.75 0 0 1 1.06 0L10 8.94l3.72-3.72a.75.75 0 1 1 1.06 1.06L11.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06L10 11.06l-3.72 3.72a.75.75 0 1 1-1.06-1.06L8.94 10 5.22 6.28a.75.75 0 0 1 0-1.06Z" fill="currentColor" />
+      ) : (
+        <path d="M3.75 5.5A.75.75 0 0 1 4.5 4.75h11a.75.75 0 0 1 0 1.5h-11a.75.75 0 0 1-.75-.75Zm0 4.5a.75.75 0 0 1 .75-.75h11a.75.75 0 0 1 0 1.5h-11a.75.75 0 0 1-.75-.75Zm0 4.5a.75.75 0 0 1 .75-.75h11a.75.75 0 0 1 0 1.5h-11a.75.75 0 0 1-.75-.75Z" fill="currentColor" />
+      )}
+    </svg>
+  );
+}
+
 function AccountIcon() {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true" className="account-icon-svg">
@@ -887,64 +910,96 @@ function AccountIcon() {
 }
 
 function SiteMenu({currentRoute, onNavigate, sessionUser, onSignOut, showSignOut}) {
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const items = [
     {path: APP_ROUTES.analytics, label: "Analytics", icon: <AnalyticsIcon />},
+    {path: APP_ROUTES.feedback, label: "Feedback", icon: <FeedbackIcon />},
     {path: APP_ROUTES.tasks, label: "Tasks", icon: <TasksIcon />},
   ];
 
+  useEffect(() => {
+    setMobileMenuOpen(false);
+    setAccountMenuOpen(false);
+  }, [currentRoute]);
+
   return (
-    <aside className="site-menu">
-      <div>
+    <aside className={mobileMenuOpen ? "site-menu mobile-open" : "site-menu"}>
+      <div className="site-menu-topbar">
         <div className="site-menu-header">
           <div className="eyebrow">Workspace</div>
           <h2>EFORT CENTER</h2>
         </div>
-        <nav className="site-nav" aria-label="Sections">
-          {items.map((item) => {
-            const active = currentRoute === item.path;
-            return (
-              <button
-                key={item.path}
-                type="button"
-                className={active ? "site-nav-link active" : "site-nav-link"}
-                onClick={() => onNavigate(item.path)}
-              >
-                <span className="site-nav-icon">{item.icon}</span>
-                <span className="site-nav-title">{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
+        <button
+          type="button"
+          className={mobileMenuOpen ? "site-menu-toggle active" : "site-menu-toggle"}
+          aria-expanded={mobileMenuOpen}
+          aria-controls="site-menu-content"
+          aria-label={mobileMenuOpen ? "Hide workspace menu" : "Show workspace menu"}
+          onClick={() => setMobileMenuOpen((value) => !value)}
+        >
+          <span className="site-nav-icon"><MenuToggleIcon open={mobileMenuOpen} /></span>
+        </button>
       </div>
 
-      {sessionUser ? (
-        <div className="site-menu-footer">
-          <button
-            type="button"
-            className={menuOpen ? "account-button active" : "account-button"}
-            onClick={() => setMenuOpen((value) => !value)}
-          >
-            <span className="account-icon"><AccountIcon /></span>
-            <span className="account-copy">
-              <span className="account-label">Account</span>
-              <span className="account-email">{sessionUser.email}</span>
-            </span>
-          </button>
+      <button
+        type="button"
+        className="site-menu-overlay"
+        aria-label="Close workspace menu"
+        onClick={() => setMobileMenuOpen(false)}
+      />
 
-          {menuOpen ? (
-            <div className="account-menu">
-              {showSignOut ? (
-                <button type="button" className="account-menu-item" onClick={onSignOut}>
-                  Sign out
+      <div className="site-menu-content" id="site-menu-content">
+        <div className="site-menu-nav-group">
+          <nav className="site-nav" aria-label="Sections">
+            {items.map((item) => {
+              const active = currentRoute === item.path;
+              return (
+                <button
+                  key={item.path}
+                  type="button"
+                  className={active ? "site-nav-link active" : "site-nav-link"}
+                  onClick={() => {
+                    onNavigate(item.path);
+                    setMobileMenuOpen(false);
+                  }}
+                >
+                  <span className="site-nav-icon">{item.icon}</span>
+                  <span className="site-nav-title">{item.label}</span>
                 </button>
-              ) : (
-                <div className="account-menu-note">Demo session</div>
-              )}
-            </div>
-          ) : null}
+              );
+            })}
+          </nav>
         </div>
-      ) : null}
+
+        {sessionUser ? (
+          <div className="site-menu-footer">
+            <button
+              type="button"
+              className={accountMenuOpen ? "account-button active" : "account-button"}
+              onClick={() => setAccountMenuOpen((value) => !value)}
+            >
+              <span className="account-icon"><AccountIcon /></span>
+              <span className="account-copy">
+                <span className="account-label">Account</span>
+                <span className="account-email">{sessionUser.email}</span>
+              </span>
+            </button>
+
+            {accountMenuOpen ? (
+              <div className="account-menu">
+                {showSignOut ? (
+                  <button type="button" className="account-menu-item" onClick={onSignOut}>
+                    Sign out
+                  </button>
+                ) : (
+                  <div className="account-menu-note">Demo session</div>
+                )}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </aside>
   );
 }
@@ -1241,10 +1296,10 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (isAdmin) {
+    if (isAdmin && currentRoute === APP_ROUTES.analytics) {
       loadData(false);
     }
-  }, [isAdmin, startDate, endDate]);
+  }, [currentRoute, isAdmin, startDate, endDate]);
 
   const normalizedMetaRows = useMemo(() => {
     return metaRows.map((row) => ({
@@ -1602,8 +1657,6 @@ export default function App() {
   const topBySignupsWithMeta = useMemo(() => {
     return derived.topBySignups.filter((row) => row.hasMetaAttributionLink);
   }, [derived.topBySignups]);
-  const dateRangeLabel = `${startDate} to ${endDate}`;
-
   const renderCreativeCell = (row) => formatMetaLinkedMetric(row, () => (
     row.creative_thumbnail_url || row.creative_name || row.creative_id
       ? (
@@ -1954,9 +2007,9 @@ export default function App() {
     await signOut(auth);
   };
 
-  const isOperationsRoute = currentRoute === APP_ROUTES.tasks;
+  const isTasksRoute = currentRoute === APP_ROUTES.tasks;
   const tasksBackend = import.meta.env.VITE_TASKS_BACKEND || "firebase";
-  const operationsDemoEnabled = isOperationsRoute && tasksBackend === "mock";
+  const operationsDemoEnabled = isTasksRoute && tasksBackend === "mock";
   const sessionUser = operationsDemoEnabled && !user ? DEMO_USER : user;
 
   if (!authReady && !operationsDemoEnabled) {
@@ -1967,7 +2020,7 @@ export default function App() {
     );
   }
 
-  if (isOperationsRoute) {
+  if (isTasksRoute) {
     if (!sessionUser) {
       return (
         <div className="app-shell">
@@ -2059,14 +2112,17 @@ export default function App() {
       />
       <div className="operations-main">
         <main className="page-shell">
-          <header className="top-bar">
-            <div>
-              <div className="eyebrow">Efort internal analytics</div>
-              <h1>Ad Funnel Dashboard</h1>
-              <p className="muted">Date range: {dateRangeLabel}</p>
-            </div>
-          </header>
-          <section className="controls card">
+          {currentRoute === APP_ROUTES.feedback ? (
+            <FeedbackPage />
+          ) : (
+            <>
+              <header className="top-bar">
+                <div>
+                  <div className="eyebrow">Efort internal analytics</div>
+                  <h1>Ad Funnel Dashboard</h1>
+                </div>
+              </header>
+              <section className="controls card">
         <div className="scope-control">
           <label>Audience</label>
           <div className="segmented" role="tablist" aria-label="Audience scope">
@@ -2722,7 +2778,6 @@ export default function App() {
           <div>
             <h2>Ad-Level Funnel Table</h2>
             <div className="table-meta">
-              <span className="muted">Date range: {dateRangeLabel}</span>
               <span className="muted">Timezone: {metaTimezone}</span>
             </div>
           </div>
@@ -2768,7 +2823,6 @@ export default function App() {
           <div>
             <h2>Ad Set Table</h2>
             <div className="table-meta">
-              <span className="muted">Date range: {dateRangeLabel}</span>
               <span className="muted">Timezone: {metaTimezone}</span>
             </div>
           </div>
@@ -2831,7 +2885,9 @@ export default function App() {
             <code>N/A</code> to avoid false precision.
           </li>
         </ul>
-      </section>
+              </section>
+            </>
+          )}
         </main>
       </div>
     </div>

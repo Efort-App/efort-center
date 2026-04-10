@@ -2,6 +2,7 @@ import {useEffect, useMemo, useState} from "react";
 import {
   createTask,
   createTaskTemplate,
+  deleteTask,
   deleteTaskTemplate,
   loadTasksWorkspace,
   saveTaskSchedule,
@@ -107,7 +108,7 @@ function getLatestTaskUpdate(task) {
   return Array.isArray(task?.updates) && task.updates.length > 0 ? task.updates[0] : null;
 }
 
-function TaskModal({task, owners, onClose, onSave, saving}) {
+function TaskModal({task, owners, onClose, onSave, onDelete, saving, deleting}) {
   const [draft, setDraft] = useState(null);
 
   useEffect(() => {
@@ -315,13 +316,23 @@ function TaskModal({task, owners, onClose, onSave, saving}) {
           </div>
         </div>
 
-        <div className="modal-actions">
-          <button className="secondary" type="button" onClick={onClose}>
-            Cancel
+        <div className="modal-actions split-actions">
+          <button className="danger" type="button" disabled={saving || deleting} onClick={() => onDelete(task.id)}>
+            {deleting ? "Deleting…" : "Delete task"}
           </button>
-          <button className="primary" type="button" disabled={saving} onClick={() => onSave(task.id, draft)}>
-            {saving ? "Saving…" : "Save task"}
-          </button>
+          <div className="modal-actions-group">
+            <button className="secondary" type="button" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              className="primary"
+              type="button"
+              disabled={saving || deleting}
+              onClick={() => onSave(task.id, draft)}
+            >
+              {saving ? "Saving…" : "Save task"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -430,6 +441,7 @@ export default function TasksPage() {
   const [creatingTask, setCreatingTask] = useState(false);
   const [creatingTemplate, setCreatingTemplate] = useState(false);
   const [savingTask, setSavingTask] = useState(false);
+  const [deletingTask, setDeletingTask] = useState(false);
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [error, setError] = useState("");
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -474,6 +486,7 @@ export default function TasksPage() {
       || Boolean(selectedTaskId)
       || Boolean(selectedTemplateId)
       || savingTask
+      || deletingTask
       || savingTemplate
       || creatingTask
       || creatingTemplate
@@ -502,6 +515,7 @@ export default function TasksPage() {
     selectedTaskId,
     selectedTemplateId,
     savingTask,
+    deletingTask,
     savingTemplate,
     creatingTask,
     creatingTemplate,
@@ -648,6 +662,26 @@ export default function TasksPage() {
       setError(err?.message || "Failed to save task.");
     } finally {
       setSavingTask(false);
+    }
+  };
+
+  const handleDeleteTask = async (taskId) => {
+    const task = tasks.find((item) => item.id === taskId);
+    if (!task) return;
+    if (!window.confirm(`Delete task "${task.title}"?`)) {
+      return;
+    }
+
+    setDeletingTask(true);
+    setError("");
+    try {
+      await deleteTask(taskId);
+      setTasks((current) => current.filter((item) => item.id !== taskId));
+      setSelectedTaskId("");
+    } catch (err) {
+      setError(err?.message || "Failed to delete task.");
+    } finally {
+      setDeletingTask(false);
     }
   };
 
@@ -950,7 +984,9 @@ export default function TasksPage() {
         owners={owners}
         onClose={() => setSelectedTaskId("")}
         onSave={handleSaveTask}
+        onDelete={handleDeleteTask}
         saving={savingTask}
+        deleting={deletingTask}
       />
 
       <TemplateModal
