@@ -32,6 +32,11 @@ import {
   resolveInternalResultCount,
 } from "./resultMetrics";
 import {downloadCsv} from "./tableExport";
+import {
+  computeCohortRate,
+  createEmptyFunnelAttribution,
+  incrementFunnelAttribution,
+} from "./funnelAttribution";
 
 ChartJS.register(
   CategoryScale,
@@ -195,6 +200,16 @@ function formatListValue(values) {
 
 function formatListCsv(values) {
   return Array.isArray(values) && values.length > 0 ? values.join(" | ") : "";
+}
+
+function renderTrackedInferredSummary(counts) {
+  return (
+    <>
+      Tracked: {(counts?.tracked || 0).toLocaleString()}
+      <br />
+      Inferred: {(counts?.inferred || 0).toLocaleString()}
+    </>
+  );
 }
 
 function formatAttributionSpecValue(specs) {
@@ -1402,6 +1417,7 @@ export default function App() {
       inferredPaid: 0,
       nonPaidPaid: 0,
     };
+    const funnelAttribution = createEmptyFunnelAttribution();
 
     for (const record of filteredRecords) {
       const attributionType = record._attribution?.type || "non_paid";
@@ -1439,6 +1455,14 @@ export default function App() {
       const paid = record.has_paid === true;
       const cookiesAccepted = record.cookies_accepted === true;
       const athleteTypes = normalizeAthleteTypes(record.onboarding_athletes_types);
+
+      incrementFunnelAttribution(funnelAttribution, {
+        attributionType,
+        invited: inviteCompleted,
+        blocked: blockCompleted,
+        athleteShown,
+        paid,
+      });
 
       if (inviteCompleted) {
         row.invited += 1;
@@ -1630,6 +1654,7 @@ export default function App() {
       metaSeries,
       coachSeries,
       funnelTotals,
+      funnelAttribution,
       attributionTotals,
       metaTotals: metaAggregate.totals,
       athleteTypeDailyDistribution,
@@ -1874,10 +1899,6 @@ export default function App() {
       ? (derived.metaTotals.spend * 1000) / derived.metaTotals.impressions
       : null;
 
-  const signupToPaidRate =
-    derived.funnelTotals.signups > 0
-      ? derived.funnelTotals.paid / derived.funnelTotals.signups
-      : null;
   const overallCostPerSignup =
     derived.funnelTotals.signups > 0
       ? derived.metaTotals.spend / derived.funnelTotals.signups
@@ -1894,6 +1915,16 @@ export default function App() {
     derived.attributionTotals.trackedSignups + derived.attributionTotals.inferredSignups;
   const inferredShare =
     paidAttributedSignups > 0 ? derived.attributionTotals.inferredSignups / paidAttributedSignups : null;
+  const trackedSignupToPaidRate = computeCohortRate(
+    derived.funnelAttribution.paid,
+    derived.funnelAttribution.signups,
+    "tracked",
+  );
+  const inferredSignupToPaidRate = computeCohortRate(
+    derived.funnelAttribution.paid,
+    derived.funnelAttribution.signups,
+    "inferred",
+  );
   const trackedCostPerSignup =
     derived.attributionTotals.trackedSignups > 0
       ? derived.metaTotals.spend / derived.attributionTotals.trackedSignups
@@ -2587,32 +2618,37 @@ export default function App() {
           <div className="card kpi-card">
             <h3>Signups</h3>
             <div className="value">{derived.funnelTotals.signups}</div>
-            <div className="sub">coaches_public</div>
+            <div className="sub">{renderTrackedInferredSummary(derived.funnelAttribution.signups)}</div>
           </div>
           <div className="card kpi-card">
             <h3>Invited Client</h3>
             <div className="value">{derived.funnelTotals.invited}</div>
-            <div className="sub">Invite step completed</div>
+            <div className="sub">{renderTrackedInferredSummary(derived.funnelAttribution.invited)}</div>
           </div>
           <div className="card kpi-card">
             <h3>Viewed Block</h3>
             <div className="value">{derived.funnelTotals.blocked}</div>
-            <div className="sub">Block step completed</div>
+            <div className="sub">{renderTrackedInferredSummary(derived.funnelAttribution.blocked)}</div>
           </div>
           <div className="card kpi-card">
             <h3>Shown Athlete App</h3>
             <div className="value">{derived.funnelTotals.athleteShown}</div>
-            <div className="sub">Athlete app step completed</div>
+            <div className="sub">{renderTrackedInferredSummary(derived.funnelAttribution.athleteShown)}</div>
           </div>
           <div className="card kpi-card">
             <h3>Paid</h3>
             <div className="value">{derived.funnelTotals.paid}</div>
-            <div className="sub">coaches_public</div>
+            <div className="sub">{renderTrackedInferredSummary(derived.funnelAttribution.paid)}</div>
           </div>
           <div className="card kpi-card">
-            <h3>Signup to Paid</h3>
-            <div className="value">{formatPercent(signupToPaidRate, 2)}</div>
-            <div className="sub">Paid ÷ signups</div>
+            <h3>Tracked Signup to Paid</h3>
+            <div className="value">{formatPercent(trackedSignupToPaidRate, 2)}</div>
+            <div className="sub">Tracked paid ÷ tracked signups</div>
+          </div>
+          <div className="card kpi-card">
+            <h3>Inferred Signup to Paid</h3>
+            <div className="value">{formatPercent(inferredSignupToPaidRate, 2)}</div>
+            <div className="sub">Inferred paid ÷ inferred signups</div>
           </div>
           <div className="card kpi-card">
             <h3>Cost per Signup</h3>
